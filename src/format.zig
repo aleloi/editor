@@ -16,26 +16,17 @@ fn formatFn(
 ) !void {
     _ = options;
     _ = f;
-    if (bytes.len <= WIDTH) {
-        for (bytes) |byte| {
-            if (byte >= 32 and byte <= 126) {
-                try writer.writeByte(byte);
-            } else {
-                try writer.writeAll("\x1B[41m");
-                try writer.writeAll(" ");
-                try writer.writeAll("\x1B[0m");
-            }
+
+    for (bytes[0..@min(bytes.len, WIDTH - 1)]) |byte| {
+        if (byte >= 32 and byte <= 126) {
+            try writer.writeByte(byte);
+        } else {
+            try writer.writeAll("\x1B[41m");
+            try writer.writeAll(" ");
+            try writer.writeAll("\x1B[0m");
         }
-    } else {
-        for (bytes[0..99]) |byte| {
-            if (byte >= 32 and byte <= 126) {
-                try writer.writeByte(byte);
-            } else {
-                try writer.writeAll("\x1B[41m");
-                try writer.writeAll(" ");
-                try writer.writeAll("\x1B[0m");
-            }
-        }
+    }
+    if (bytes.len >= WIDTH) {
         try writer.writeAll("\x1B[42m");
         try writer.writeAll(" ");
         try writer.writeAll("\x1B[0m");
