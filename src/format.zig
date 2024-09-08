@@ -1,6 +1,11 @@
 //! formatting printable/unprintable chars
 const std = @import("std");
 
+/// format writables unchanged
+/// otherwise space with red background
+/// if bytes are longer than WIDTH,
+/// truncate and mark with space
+/// with green background
 const WIDTH: usize = 100;
 
 fn formatFn(
