@@ -4,9 +4,11 @@ const io = std.io;
 const mem = std.mem;
 const os = std.os;
 const linux = std.os.linux;
+const posix = std.posix;
 
 const format = @import("format.zig");
 const term_utils = @import("term_utils.zig");
+const parse_utils = @import("parse_utils.zig");
 
 var file_content: [5 * 1024 * 1024]u8 = undefined;
 var bytes_read: usize = 0;
@@ -33,11 +35,30 @@ pub fn main() !void {
 
     size = try getSize();
 
+    var fds: [1]posix.pollfd = .{.{
+        .fd = tty.handle,
+        .events = posix.POLL.IN,
+        .revents = undefined,
+    }};
+
     try render();
 
     while (true) {
-        var buffer: [1]u8 = undefined;
-        _ = try tty.read(&buffer);
+        // var buffer: [1]u8 = undefined;
+        // _ = try tty.read(&buffer);
+
+        _ = try posix.poll(&fds, -1);
+        var buffer: [10]u8 = .{255} ** 10;
+        const num_read = try tty.read(&buffer);
+        if (num_read == 0) continue;
+
+        if (num_read == 0) unreachable;
+        // if (num_read > 1) {
+        //     // TODO return error so that deferred uncooking may work
+        //     //unreachable;
+        //     return;
+        // }
+        try parse_utils.parse(buffer[0..num_read]);
 
         if (buffer[0] == 'q') {
             return;
@@ -53,7 +74,7 @@ pub fn main() !void {
                 first_line -= 1;
                 try render();
             }
-        } else std.time.sleep(100); // nanoseconds!!
+        } // else std.time.sleep(100); // nanoseconds!!
     }
 }
 
