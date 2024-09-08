@@ -1,3 +1,4 @@
+// test swedish: åäö unicode 🔥🐍
 const std = @import("std");
 const fs = std.fs;
 const io = std.io;
@@ -18,12 +19,23 @@ var cooked_termios: linux.termios = undefined;
 var raw: linux.termios = undefined;
 var tty: fs.File = undefined;
 
+const Mode = enum {
+    INSERT,
+    NORMAL
+};
+
+// var cursorLine: usize = 0;
+// var cursorCol: usize = 0;
+
+
+var mode: Mode = Mode.NORMAL;
+
 pub fn main() !void {
     tty = try fs.cwd().openFile("/dev/tty", .{ .mode = .read_write });
     defer tty.close();
 
     try uncook();
-    defer cook() catch {};
+    defer cook() catch unreachable;
 
     try getInp();
 
@@ -32,25 +44,62 @@ pub fn main() !void {
     try render();
 
     while (true) {
-        var buffer: [1]u8 = undefined;
-        _ = try tty.read(&buffer);
+        var buffer: [1]u8 = .{255};
+        const num_read = try tty.read(&buffer);
+        if (num_read == 0) continue;
 
-        if (buffer[0] == 'q') {
-            return;
-        } else if (buffer[0] == 'j') {
-            // next line
-            if (linesRead + 20 > size.height and firstLine < linesRead - 20) {
-                firstLine += 1;
-                try render();
+        if (mode == Mode.NORMAL) {
+            switch (buffer[0]) {
+                'q' => {return; },
+                'j' => {
+                    std.debug.print("[j] linesRead: {}, firstLine: {}, size.height: {}\n", .{linesRead, firstLine, size.height});
+                    if (linesRead + 20 > size.height and firstLine < linesRead - 20) {
+                        firstLine += 1;
+                        try render();
+                    }
+                },
+                'k' => {
+                    std.debug.print("[k] linesRead: {}, firstLine: {}, size.height: {}\n", .{linesRead, firstLine, size.height});
+                    // previous line
+                    if (firstLine > 0) {
+                        firstLine -= 1;
+                        try render();
+                    }
+                },
+                'i' => {
+                    mode = Mode.INSERT;
+                },
+                255 => unreachable,
+                else => {
+                    std.debug.print("buffer[0] is: {}\n", .{buffer[0]});
+
+                }
             }
-        } else if (buffer[0] == 'k') {
-            // previous line
-            if (firstLine > 0) {
-                firstLine -= 1;
-                try render();
+        }
+
+        else if (mode == Mode.INSERT) {
+            switch (buffer[0]) {
+                // printable lower half ASCII chars, SPACE in 32 and TILDE is 126
+                ' ' ... '~' => {
+                    //insertIntoBufferAtCursorPosition(buffer[0])
+                    try insertToTTY(&buffer);
+                },
+                '\x1B' => {
+                    mode = Mode.NORMAL;
+                },
+                else => {
+                    std.debug.print("Wants to insert: {}\n", .{buffer[0]});
+
+                }
             }
         }
     }
+}
+
+fn insertToTTY(writableBytes: []const u8) !void {
+    const writer = tty.writer();
+    const num_written = try writer.write(writableBytes);
+    std.debug.assert(num_written == writableBytes.len);
 }
 
 fn render() !void {
@@ -72,7 +121,7 @@ fn uncook() !void {
     if (linux.tcgetattr(tty.handle, &cooked_termios) != 0) {
         @panic("failed tcgetattr()");
     }
-    errdefer cook() catch {};
+    errdefer cook() catch unreachable;
 
     raw = cooked_termios;
     raw.lflag.ECHO = false;
@@ -91,7 +140,7 @@ fn uncook() !void {
     if (linux.tcsetattr(tty.handle, .FLUSH, &raw) != 0) {
         @panic("uncook failed tcsetattr()");
     }
-    try hideCursor(writer);
+    //try hideCursor(writer);
     try enterAlt(writer);
     try clear(writer);
 }
