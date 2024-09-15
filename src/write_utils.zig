@@ -69,15 +69,15 @@ pub fn MultiWriter(comptime WriterType: type) type {
         //     };
         // }
 
-        pub fn writeByte(self: Self, byte: u8) !void {
+        pub fn writeByte(self: *Self, byte: u8) !void {
             std.debug.print("{c}", .{byte});
             try self.writer.print("{c}", .{byte});
         }
-        pub fn writeAll(self: Self, bytes: []const u8) !void {
+        pub fn writeAll(self: *Self, bytes: []const u8) !void {
             std.debug.print("{s}", .{bytes});
             try self.writer.print("{s}", .{bytes});
         }
-        pub fn print(self: Self, comptime fmt: []const u8, args: anytype) !void {
+        pub fn print(self: *Self, comptime fmt: []const u8, args: anytype) !void {
             std.debug.print(fmt, args);
             std.debug.print("\n", .{});
             try self.writer.print(fmt, args);
