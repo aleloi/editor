@@ -110,11 +110,12 @@ fn render_file_content(writer: anytype) !void {
 /// render bottom ui
 fn render_bottom_ui(maybe_bytes: ?[]const u8, writer: anytype) !void {
     var multi_writer = write_utils.multiWriter(writer);
+    const the_writer = multi_writer.writer();
     if (maybe_bytes) |bytes| {
         try moveCursor(writer, size.height - 2, 0);
-        try parse_utils.rawWrite(bytes, &multi_writer);
+        try parse_utils.rawWrite(bytes, the_writer);
         try moveCursor(writer, size.height - 1, 0);
-        try parse_utils.parseWrite(bytes, &multi_writer);
+        try parse_utils.parseWrite(bytes, the_writer);
     }
 }
 

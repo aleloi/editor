@@ -252,18 +252,20 @@ pub fn rawWrite(bytes: []const u8, writer: anytype) !void {
 
 test "test parse bytes 0..128" {
     // zig test src/parse_utils.zig
-    const write_utils = @import("write_utils.zig");
+    const stderr = std.io.getStdErr();
+    const writer = stderr.writer();
 
     for (0..128) |i| {
-        try parseWrite(&[1]u8{@as(u8, @truncate(i))}, write_utils.DebugWriter);
+        try parseWrite(&[1]u8{@as(u8, @truncate(i))}, writer);
     }
 }
 
 test "test parse bytes 27(ALT/ESC/...) + 0..128" {
     // zig test src/parse_utils.zig
-    const write_utils = @import("write_utils.zig");
+    const stderr = std.io.getStdErr();
+    const writer = stderr.writer();
 
     for (0..128) |i| {
-        try parseWrite(&[2]u8{ 27, @as(u8, @truncate(i)) }, write_utils.DebugWriter);
+        try parseWrite(&[2]u8{ 27, @as(u8, @truncate(i)) }, writer);
     }
 }

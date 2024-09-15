@@ -57,35 +57,24 @@ pub const DebugWriter = struct {
 /// writes to std.debug as well as the supplied writer
 pub fn MultiWriter(comptime WriterType: type) type {
     return struct {
-        writer: WriterType,
+        wrapped_writer: WriterType,
 
         const Self = @This();
+        pub const Error = WriterType.Error;
+        pub const Writer = std.io.Writer(*Self, Error, write);
 
-        // pub const Writer = std.io.Writer(*Self, Error, write);
-
-        // pub fn init(writer: anytype) MultiWriter {
-        //     return MultiWriter{
-        //         .writer = writer,
-        //     };
-        // }
-
-        pub fn writeByte(self: *Self, byte: u8) !void {
-            std.debug.print("{c}", .{byte});
-            try self.writer.print("{c}", .{byte});
-        }
-        pub fn writeAll(self: *Self, bytes: []const u8) !void {
+        pub fn write(self: *Self, bytes: []const u8) Error!usize {
             std.debug.print("{s}", .{bytes});
-            try self.writer.print("{s}", .{bytes});
+            return try self.wrapped_writer.write(bytes);
         }
-        pub fn print(self: *Self, comptime fmt: []const u8, args: anytype) !void {
-            std.debug.print(fmt, args);
-            std.debug.print("\n", .{});
-            try self.writer.print(fmt, args);
+
+        pub fn writer(self: *Self) Writer {
+            return .{ .context = self };
         }
     };
 }
 
 /// get a MultiWriter, that writes to std.debug as well as the supplied writer
 pub fn multiWriter(writer: anytype) MultiWriter(@TypeOf(writer)) {
-    return .{ .writer = writer };
+    return .{ .wrapped_writer = writer };
 }
