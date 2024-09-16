@@ -61,12 +61,6 @@ pub fn main() !void {
         if (num_read == 0) continue;
 
         if (num_read == 0) unreachable;
-        // if (num_read > 1) {
-        //     // TODO return error so that deferred uncooking may work
-        //     //unreachable;
-        //     return;
-        // }
-        // try parse_utils.parse(buffer[0..num_read]);
 
         if (buffer[0] == 'q') {
             return;
@@ -108,14 +102,14 @@ fn render_file_content(writer: anytype) !void {
 }
 
 /// render bottom ui
-fn render_bottom_ui(maybe_bytes: ?[]const u8, writer: anytype) !void {
-    var multi_writer = write_utils.multiWriter(writer);
-    const the_writer = multi_writer.writer();
+fn render_bottom_ui(maybe_bytes: ?[]const u8, arg_writer: anytype) !void {
+    var multi_writer = write_utils.multiWriter(arg_writer);
+    const writer = multi_writer.writer();
     if (maybe_bytes) |bytes| {
         try moveCursor(writer, size.height - 2, 0);
-        try parse_utils.rawWrite(bytes, the_writer);
+        try parse_utils.rawWrite(bytes, writer);
         try moveCursor(writer, size.height - 1, 0);
-        try parse_utils.parseWrite(bytes, the_writer);
+        try parse_utils.parseWrite(bytes, writer);
     }
 }
 
@@ -166,6 +160,7 @@ fn getInp() !void {
 }
 
 // this seems to ensure all tests are run
+// when placed in the root file
 test {
     std.testing.refAllDecls(@This());
     // or refAllDeclsRecursive
