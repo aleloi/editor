@@ -37,6 +37,34 @@ pub fn myFmtLine(bytes: []const u8) std.fmt.Formatter(formatFn) {
     return .{ .data = bytes };
 }
 
+fn formatUnreadableByte(
+    bytes: []const u8,
+    comptime f: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    _ = options;
+    _ = f;
+    for (bytes) |byte| {
+        try writer.writeAll("\"");
+        defer writer.writeAll("\" ") catch {};
+        switch (byte) {
+            // unprintable ascii
+            0...31, 127 => try writer.print("\\x{X:0>2}", .{byte}),
+            // printable ascii
+            32...126 => try writer.writeByte(byte),
+            // non-ascii (including 128...255)
+            else => try writer.print("non-ASCII \\x{X:0>2}", .{byte}),
+        }
+    }
+}
+
+/// format printable chars unchanged
+/// otherwise print hex
+pub fn myFmtBytes(bytes: []const u8) std.fmt.Formatter(formatUnreadableByte) {
+    return .{ .data = bytes };
+}
+
 test "test dots" {
     const str: []const u8 = "my_test_string";
     std.debug.print("testing .. : {s}\n", .{str[0..4]});
