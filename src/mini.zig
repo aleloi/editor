@@ -164,3 +164,9 @@ fn getInp() !void {
         lines_read += 1;
     }
 }
+
+// this seems to ensure all tests are run
+test {
+    std.testing.refAllDecls(@This());
+    // or refAllDeclsRecursive
+}

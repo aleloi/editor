@@ -58,3 +58,7 @@ test "test format" {
     }
     std.debug.print("{}\n", .{myFmtLine(&my_buf)});
 }
+
+// test "test panic" {
+//     @panic("Test to ensure all tests are run.");
+// }
