@@ -48,3 +48,4 @@ logs
 # *.txt
 # *.in
 # *.out
+.aider*

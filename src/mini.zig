@@ -1,4 +1,5 @@
 const std = @import("std");
+const rope = @import("rope");
 const fs = std.fs;
 const io = std.io;
 const mem = std.mem;
