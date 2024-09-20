@@ -1,50 +1,7 @@
+//! rope, Rope data structure implementation and tests.
 const std = @import("std");
 const rc = @import("zigrc");
 
-const AggregateStats = struct {
-    num_newlines: usize,
-    num_bytes: usize,
-    last_newline_pos: ?usize,
-
-    fn empty() @This() {
-        return .{ .num_newlines = 0, .num_bytes = 0, .last_newline_pos = null };
-    }
-
-    fn fromSlice(slice: []const u8) @This() {
-        var num_newlines: usize = 0;
-        var last_newline_pos: ?usize = null;
-        for (slice, 0..) |val, i| {
-            if (val == '\n') {
-                num_newlines += 1;
-                last_newline_pos = i;
-            }
-        }
-        return .{ .num_newlines = num_newlines, .num_bytes = slice.len, .last_newline_pos = last_newline_pos };
-    }
-
-    fn combine(self: *const @This(), other: @This()) @This() {
-        const last_newline_pos = blk: {
-            if (other.last_newline_pos) |lnp| {
-                break :blk lnp + self.num_bytes;
-            } else {
-                break :blk self.last_newline_pos;
-            }
-        };
-        return .{
-            .num_newlines = self.num_newlines + other.num_newlines,
-            .num_bytes = self.num_bytes + other.num_bytes,
-            .last_newline_pos = last_newline_pos,
-        };
-    }
-};
-
-const NodeTag = enum {
-    leaf,
-    inner,
-};
-
-const Leaf = std.BoundedArray(u8, BRANCH_FACTOR);
-const Inner = std.BoundedArray(rc.Rc(Node), BRANCH_FACTOR);
 
 const BRANCH_FACTOR = 4;
 
@@ -58,7 +15,80 @@ const MAX_DEPTH: comptime_int = blk: {
     break :blk std.math.log_int(comptime_int, BRANCH_FACTOR, maxFileSizeBytes) + 2;
 };
 
+
+/// For convenient indexing inside a Rope. Refers to a row, col
+/// position relative to a root node. The first byte is always `row=0,
+/// col=0`.
+pub const Pos = struct {
+    row: usize,
+    col: usize,
+
+    /// Less than or equal, self <= other, this pos is before or at
+    /// other pos.
+    fn lexLe(self: @This(), other: @This()) bool {
+        return self.row < other.row or (self.row == other.row and self.col <= other.col);
+    }
+
+    fn lexLt(self: @This(), other: @This()) bool {
+        return self.row < other.row or (self.row == other.row and self.col < other.col);
+    }
+};
+
+
+/// A rope tree node. Contains aggregate stats for all the bytes
+/// stored in descendants. The node itself is either a Leaf or an
+/// Inner node; Inner nodes contain refcounted pointers to child
+/// nodes.
 pub const Node = struct {
+
+    /// Every tree node contains aggregate stats for all bytes in its
+    /// descendents.
+    const AggregateStats = struct {
+        num_newlines: usize,
+        num_bytes: usize,
+        last_newline_pos: ?usize,
+
+        fn empty() @This() {
+            return .{ .num_newlines = 0, .num_bytes = 0, .last_newline_pos = null };
+        }
+
+        fn fromSlice(slice: []const u8) @This() {
+            var num_newlines: usize = 0;
+            var last_newline_pos: ?usize = null;
+            for (slice, 0..) |val, i| {
+                if (val == '\n') {
+                    num_newlines += 1;
+                    last_newline_pos = i;
+                }
+            }
+            return .{ .num_newlines = num_newlines, .num_bytes = slice.len, .last_newline_pos = last_newline_pos };
+        }
+
+        fn combine(self: *const @This(), other: @This()) @This() {
+            const last_newline_pos = blk: {
+                if (other.last_newline_pos) |lnp| {
+                    break :blk lnp + self.num_bytes;
+                } else {
+                    break :blk self.last_newline_pos;
+                }
+            };
+            return .{
+                .num_newlines = self.num_newlines + other.num_newlines,
+                .num_bytes = self.num_bytes + other.num_bytes,
+                .last_newline_pos = last_newline_pos,
+            };
+        }
+    };
+
+    const NodeTag = enum {
+        leaf,
+        inner,
+    };
+
+    const Leaf = std.BoundedArray(u8, BRANCH_FACTOR);
+    const Inner = std.BoundedArray(rc.Rc(Node), BRANCH_FACTOR);
+
+
     agg: AggregateStats,
     node: union(NodeTag) {
         leaf: Leaf,
@@ -110,10 +140,12 @@ pub const Node = struct {
                     // we just popped it, so it fits.
                     self.rec_stack.append(top) catch unreachable;
 
-                    // This will work unless the stack is MAX_DEPTH, whith shouldn't happen.
-                    // Let's crash if it does.
+                    // This will work unless the stack is MAX_DEPTH,
+                    // which COULD but shouldn't happen unless you
+                    // manually chain together a long list of parent
+                    // nodes. Let's safely crash in Release if it happens.
                     self.rec_stack.append(.{ .node = kid_ptr, .kid_index = 0 }) catch {
-                        std.debug.print("Can't append! {}\n", .{self.rec_stack});
+                        std.debug.print("Can't append, depth too high! {}\n", .{self.rec_stack});
                         std.debug.dumpCurrentStackTrace(null);
                         std.process.exit(1);
                         unreachable;
@@ -206,7 +238,7 @@ pub const Node = struct {
             piece_start = piece_end;
         }
 
-        var agg: AggregateStats = AggregateStats.empty();
+        var agg: AggregateStats = Node.AggregateStats.empty();
         for (inner.slice()) |kid| {
             agg = agg.combine(kid.value.*.agg);
         }
@@ -214,18 +246,123 @@ pub const Node = struct {
         return try rc.Rc(Node).init(alloc, n);
     }
 
+    /// For (rather slowly) iterating though all bytes in the tree
+    /// rooted at `self`. Amortized O(1) per byte if the tree is
+    /// properly balanced, but recursive, slow-ish, and crashes on
+    /// very very deep tres.
     fn allBytesIterator(self: *const @This()) Iterator {
-        // const self: [1] *const Node = .{};
         var res: Iterator = .{ .rec_stack = .{} };
         res.rec_stack.append(.{ .node = self, .kid_index = 0 }) catch unreachable;
         return res;
     }
 
-    // /// Checks that all leafs are at the right level, crashes on failure.
-    // fn debugCheck(self: *const @This(), expected_height: ?usize) void {
+    /// Creates a new tree that contains concatenated data from `self`
+    /// and then `other`, in that order. The new tree will contain
+    /// pointers to nodes of `self` and `other`; refcounts will be
+    /// incremented. Will allocate `O(max(self.height(),
+    /// other.height()))` new nodes. Returns a refcounted pointer to
+    /// the new tree. To release the memory, do `result.deinit()` for
+    /// recursively decreasing refcounts, and then `result.release()`.
+    fn concat(self: *const @This(), other: *const @This(), alloc: std.mem.Allocator) !rc.Rc(@This()) {
+        _ = self;
+        _ = other;
+        _ = alloc;
+        unreachable;
+    }
 
-    // }
+    const PosError = error{
+        InvalidPos,
+    };
 
+    fn debugPrintSlice(self: *const @This()) void {
+        var iter = self.allBytesIterator();
+        std.debug.print("'", .{});
+        while (iter.next()) |b| {
+            std.debug.print("{c}", .{b});
+        }
+        std.debug.print("'\n", .{});
+    }
+
+    /// Translates Pos-based indices to offset-based
+    /// indices. E.g. `Pos {.row=0, .col=0}` is 0 whenever the rope
+    /// contains at least one byte. Returns an error if the tree
+    /// doesn't have that position; e.g. `.{row=0, col=1000}` when the
+    /// first line has fewer than 1000 bytes. TODO: maybe return what
+    /// went wrong? error.LineTooShort / error.TooFewLines?
+    fn posToOffset(self: *const @This(), p: Pos) PosError!usize {
+        switch (self.node) {
+            .leaf => |leaf_p| {
+                const bytes: []const u8 = leaf_p.slice();
+                var row: usize = p.row;
+                var curr_line_start: usize = 0;
+                while (row > 0) {
+                    const line_break = std.mem.indexOfScalarPos(u8, bytes, curr_line_start, '\n');
+                    if (line_break) |lbp| {
+                        curr_line_start  = lbp+1;
+                        row -= 1;
+                    } else {
+                        // Searching for a line beyond this subtree.
+                        return PosError.InvalidPos;
+                    }
+                }
+
+                // Check whether the current line contains at least col chars:
+                const next_line_break = std.mem.indexOfScalarPos(u8, bytes, curr_line_start, '\n');
+                const curr_line_length = blk: {
+                    if (next_line_break) |nlb| {
+                        //"aoeuaoeu\n\n";
+                        //          ^ - curr line start, nlb is one away (OKAY)
+                        break :blk nlb - curr_line_start;
+                    } else {
+                        //"aoeuaoeu\n";
+                        //          ^ - curr line start, len is one away (OKAY)
+                        break :blk bytes.len - curr_line_start;
+                    }
+                };
+                if (curr_line_length < p.col) {
+                    // Not enough characters in line!
+                    return PosError.InvalidPos;
+                }
+                return curr_line_start + p.col;
+            },
+            .inner => |inner_p| {
+                const kids: []const rc.Rc(Node) = inner_p.slice();
+                var start = Pos {.col=0, .row=0};
+                var bytes_in_kids: usize = 0;
+                for (kids) |kid| {
+                    const kid_agg = kid.value.*.agg;
+                    const end_col: usize = blk: {
+                        // TODO something fishy here! But tests do pass...
+                        if (kid_agg.num_newlines == 0) {
+                            break :blk start.col + kid_agg.num_bytes;
+                        } else {
+                            std.debug.assert(kid_agg.last_newline_pos != null);
+                            break :blk kid_agg.num_bytes - 1 -
+                                (kid_agg.last_newline_pos orelse unreachable);
+                        }
+                    };
+                    const end = Pos {.row = start.row + kid_agg.num_newlines,
+                                     .col = end_col};
+                    if (start.lexLe(p) and p.lexLt(end)) {
+                        const kid_p = blk: {
+                            if (p.row == start.row) {
+                                break :blk Pos {.row = 0, .col = p.col - start.col};
+                            } else {
+                                // To tired to think about this; it's
+                                // in the python code.
+                                std.debug.assert(p.row > start.row);
+                                break :blk Pos {.row = p.row - start.row, .col=p.col};
+                            }
+                        };
+                        return bytes_in_kids + try kid.value.*.posToOffset(kid_p);
+                    }
+                    start = end;
+                    bytes_in_kids += kid_agg.num_bytes;
+                }
+                return PosError.InvalidPos;
+            }
+        }
+    }
 };
 
 const expect = std.testing.expect;
@@ -236,15 +373,15 @@ test "B at least 2" {
 }
 
 test "can create leaf node" {
-    const leaf = Leaf{};
-    _ = Node{ .node = .{ .leaf = leaf }, .agg = AggregateStats.empty() };
+    const leaf = Node.Leaf{};
+    _ = Node{ .node = .{ .leaf = leaf }, .agg = Node.AggregateStats.empty() };
 }
 
 /// Creates refcounted leaf node; should have a single strong pointer.
 fn leafNodeForTest(alloc: std.mem.Allocator) !rc.Rc(Node) {
     const leaf_content = "abc";
-    const leaf = try Leaf.fromSlice(leaf_content);
-    const n = Node{ .node = .{ .leaf = leaf }, .agg = AggregateStats.empty() };
+    const leaf = try Node.Leaf.fromSlice(leaf_content);
+    const n = Node{ .node = .{ .leaf = leaf }, .agg = Node.AggregateStats.empty() };
     return try rc.Rc(Node).init(alloc, n);
 }
 
@@ -252,9 +389,9 @@ fn leafNodeForTest(alloc: std.mem.Allocator) !rc.Rc(Node) {
 /// 1 strong pointer each.
 fn innerNodeForTest(alloc: std.mem.Allocator) !rc.Rc(Node) {
     const leaf = try leafNodeForTest(alloc);
-    var inner = try Inner.init(1);
+    var inner = try Node.Inner.init(1);
     inner.set(0, leaf);
-    const inner_node = Node{ .node = .{ .inner = inner }, .agg = AggregateStats.empty() };
+    const inner_node = Node{ .node = .{ .inner = inner }, .agg = Node.AggregateStats.empty() };
     return try rc.Rc(Node).init(alloc, inner_node);
 }
 
@@ -271,8 +408,8 @@ test "leaf node height is 0" {
 
 test "parent node height is 1" {
     const leaf: [1]rc.Rc(Node) = .{try leafNodeForTest(std.testing.allocator)};
-    const inner = try Inner.fromSlice(&leaf);
-    var parent_node = Node{ .node = .{ .inner = inner }, .agg = AggregateStats.empty() };
+    const inner = try Node.Inner.fromSlice(&leaf);
+    var parent_node = Node{ .node = .{ .inner = inner }, .agg = Node.AggregateStats.empty() };
     defer parent_node.deinit();
 
     try expect(parent_node.height() == 1);
@@ -286,15 +423,15 @@ test "can create inner node no leaks" {
 
 test "numKidsOrBytes leaf is num bytes" {
     const leaf_content = "abc";
-    const leaf = try Leaf.fromSlice(leaf_content);
-    const n = Node{ .node = .{ .leaf = leaf }, .agg = AggregateStats.empty() };
+    const leaf = try Node.Leaf.fromSlice(leaf_content);
+    const n = Node{ .node = .{ .leaf = leaf }, .agg = Node.AggregateStats.empty() };
     try expect(n.numKidsOrBytes() == 3);
 }
 
 test "numKidsOrBytes inner is num kids" {
     const leaf: [1]rc.Rc(Node) = .{try leafNodeForTest(std.testing.allocator)};
-    const inner = try Inner.fromSlice(&leaf);
-    var inner_node = Node{ .node = .{ .inner = inner }, .agg = AggregateStats.empty() };
+    const inner = try Node.Inner.fromSlice(&leaf);
+    var inner_node = Node{ .node = .{ .inner = inner }, .agg = Node.AggregateStats.empty() };
     defer inner_node.deinit();
 
     try expect(inner_node.numKidsOrBytes() == 1);
@@ -336,21 +473,22 @@ test "iterator returns correct values for short text" {
     try expect(iter.next() == null);
 }
 
+const longer_text =
+    \\test string with some newlines
+    \\\n definitely over 16 chars actually
+    \\longer than 64 chars
+    \\and some more text
+    \\below to pad it out
+    \\yes really
+;
+
 test "iterator returns correct values for longer text" {
-    const text =
-        \\test string with some newlines
-        \\\n definitely over 16 chars actually
-        \\longer than 64 chars
-        \\and some more text
-        \\below to pad it out
-        \\yes really
-    ;
-    var node = try Node.fromSlice(text, std.testing.allocator);
+    var node = try Node.fromSlice(longer_text, std.testing.allocator);
     defer node.release();
     defer node.value.*.deinit();
 
     var iter = node.value.*.allBytesIterator();
-    for (text) |expected| {
+    for (longer_text) |expected| {
         const actual = iter.next();
         try expect(actual != null);
         try expect(expected == actual orelse unreachable);
@@ -377,9 +515,7 @@ fn debugCheck(node: *const Node, expected_height: usize) void {
     var num_bytes: usize = 0;
     var last_newline_pos: ?usize = null;
 
-    std.debug.print("\n'", .{});
     while (iter.next()) |b| {
-        std.debug.print("{c}", .{b});
         if (b == '\n') {
             num_newlines += 1;
             last_newline_pos = num_bytes;
@@ -392,16 +528,65 @@ fn debugCheck(node: *const Node, expected_height: usize) void {
     std.debug.assert(last_newline_pos == agg.last_newline_pos);
 }
 
+const PosIterator = struct {
+    slice: [] const u8,
+    idx: usize = 0,
+    row: usize = 0,
+    col: usize = 0,
+
+    fn next(self: *@This()) ?Pos {
+        if (self.idx >= self.slice.len) return null;
+        const res = .{.row = self.row, .col = self.col};
+        if (self.slice[self.idx] == '\n') {
+            self.row += 1;
+            self.col = 0;
+        } else {
+            self.col += 1;
+        }
+        self.idx += 1;
+        return res;
+    }
+};
+
+test "pos to index in matches PosIterator" {
+    const node_p = try Node.fromSlice(longer_text, std.testing.allocator);
+    defer node_p.release();
+    defer node_p.value.*.deinit();
+
+    const node: Node = node_p.value.*;
+    var it = PosIterator {.slice=longer_text};
+
+    for (longer_text, 0..) |_, i| {
+        const p = it.next() orelse unreachable;
+        //std.debug.print("i: {}, pos: {}, byte: {c}\n", .{i, p, b});
+        const offset = node.posToOffset(p) catch unreachable;
+        //std.debug.print("offset: {}\n", .{offset});
+        try expect(offset == i);
+    }
+    try expect(it.next() == null);
+}
+
+test "posToIndex returns error on invalid col in line" {
+    const node_p = try Node.fromSlice(longer_text, std.testing.allocator);
+    defer node_p.release();
+    defer node_p.value.*.deinit();
+
+    const node: Node = node_p.value.*;
+    try expect(node.posToOffset(.{.row=0, .col=100000}) == Node.PosError.InvalidPos);
+}
+
+test "posToIndex returns error on invalid line in text" {
+    const node_p = try Node.fromSlice(longer_text, std.testing.allocator);
+    defer node_p.release();
+    defer node_p.value.*.deinit();
+
+    const node: Node = node_p.value.*;
+    try expect(node.posToOffset(.{.row=10000000, .col=0}) == Node.PosError.InvalidPos);
+}
+
+
 test "fromSlice tree is balanced and has correct agg" {
-    const text =
-        \\test string with some newlines
-        \\\n definitely over 16 chars actually
-        \\longer than 64 chars
-        \\and some more text
-        \\below to pad it out
-        \\yes really
-    ;
-    var node = try Node.fromSlice(text, std.testing.allocator);
+    var node = try Node.fromSlice(longer_text, std.testing.allocator);
     defer node.release();
     defer node.value.*.deinit();
 

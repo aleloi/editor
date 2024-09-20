@@ -1,3 +1,4 @@
+//! mini, main editor entrypoint
 const std = @import("std");
 const rope = @import("rope");
 const fs = std.fs;
@@ -18,6 +19,7 @@ var file_content: [5 * 1024 * 1024]u8 = undefined;
 var bytes_read: usize = 0;
 var lines_read: usize = 0;
 var lines: [5 * 1024 * 1024][]const u8 = undefined;
+
 /// index of first visible line
 // var first_line: usize = 0;
 const bottom_ui_rows: usize = 4;
