@@ -2,8 +2,7 @@
 const std = @import("std");
 const rc = @import("zigrc");
 
-
-const BRANCH_FACTOR = 4;
+const BRANCH_FACTOR = 16;
 
 /// Max depth is enough to store 1TB data. Used for Iterator
 /// stack-based recursion. NOTE that the tree need not use the full
@@ -14,7 +13,6 @@ const MAX_DEPTH: comptime_int = blk: {
     const maxFileSizeBytes: comptime_int = std.math.powi(usize, 10, 12) catch unreachable;
     break :blk std.math.log_int(comptime_int, BRANCH_FACTOR, maxFileSizeBytes) + 2;
 };
-
 
 /// For convenient indexing inside a Rope. Refers to a row, col
 /// position relative to a root node. The first byte is always `row=0,
@@ -34,13 +32,17 @@ pub const Pos = struct {
     }
 };
 
+fn panicAndExit(info: []const u8, extra: anytype) noreturn {
+    std.debug.print("{s} {any}", .{ info, extra });
+    std.debug.dumpCurrentStackTrace(null);
+    std.process.exit(1);
+}
 
 /// A rope tree node. Contains aggregate stats for all the bytes
 /// stored in descendants. The node itself is either a Leaf or an
 /// Inner node; Inner nodes contain refcounted pointers to child
 /// nodes.
 pub const Node = struct {
-
     /// Every tree node contains aggregate stats for all bytes in its
     /// descendents.
     const AggregateStats = struct {
@@ -87,7 +89,6 @@ pub const Node = struct {
 
     const Leaf = std.BoundedArray(u8, BRANCH_FACTOR);
     const Inner = std.BoundedArray(rc.Rc(Node), BRANCH_FACTOR);
-
 
     agg: AggregateStats,
     node: union(NodeTag) {
@@ -144,12 +145,9 @@ pub const Node = struct {
                     // which COULD but shouldn't happen unless you
                     // manually chain together a long list of parent
                     // nodes. Let's safely crash in Release if it happens.
-                    self.rec_stack.append(.{ .node = kid_ptr, .kid_index = 0 }) catch {
-                        std.debug.print("Can't append, depth too high! {}\n", .{self.rec_stack});
-                        std.debug.dumpCurrentStackTrace(null);
-                        std.process.exit(1);
-                        unreachable;
-                    };
+                    self.rec_stack.append(.{ .node = kid_ptr, .kid_index = 0 }) catch
+                        panicAndExit("Can't append, depth too high!\n", .{self.rec_stack});
+
                     // Recursively get the next byte and update state.
                     return self.next();
                 },
@@ -263,7 +261,76 @@ pub const Node = struct {
     /// other.height()))` new nodes. Returns a refcounted pointer to
     /// the new tree. To release the memory, do `result.deinit()` for
     /// recursively decreasing refcounts, and then `result.release()`.
-    fn concat(self: *const @This(), other: *const @This(), alloc: std.mem.Allocator) !rc.Rc(@This()) {
+    pub fn concat(self: @This(), other: @This(), alloc: std.mem.Allocator) !rc.Rc(@This()) {
+        if (self.agg.num_bytes == 0) {
+            return try rc.Rc(Node).init(alloc, other);
+        }
+        if (other.agg.num_bytes == 0) {
+            return try rc.Rc(Node).init(alloc, self);
+        }
+
+        if (self.height() >= other.height()) {
+            return self.concatWithLower(other, alloc);
+        } else {
+            return self.concatWithHigher(other, alloc);
+        }
+    }
+
+    /// Crashes on failure. Maybe make an error?
+    fn assertExtractInner(self: @This()) Inner {
+        switch (self.node) {
+            .inner => |inner_v| return inner_v,
+            .leaf => panicAndExit("Logic error, we thought this was an inner node", .{self}),
+        }
+    }
+
+    /// Concatenation implementation, left big with right small. Also
+    /// see the corresponding code in Node._concat_lower in
+    /// rope.py. Overall algorithm explained in
+    /// https://youtu.be/fbVSXfbNB0M (in Russian, with mutable nodes
+    /// rather than immutable as here, and no code). Idea: think the
+    /// trees side by side resting on the leafs. Find the rightmost
+    /// node (in self) at the same level as the root of the left tree,
+    /// and keep the path from the right root (self) to that. Walk up
+    /// the chain until you find a node that can be merged with the
+    /// right side, then merge and create a new chain or
+    /// parents. Sometimes the resulting tree height increases by 1.
+    fn concatWithLower(self: @This(), right: @This(), alloc: std.mem.Allocator) !rc.Rc(@This()) {
+        const h_right = self.height();
+        const h_left = right.height();
+        std.debug.assert(h_right >= h_right);
+
+        // Terminology: left merge node - the rightmost node of the
+        // left tree which is at the same level as the right root.
+
+        // Constructs a chain of nodes from the root to the left
+        // merge node inclusive.
+        var rootToLeft: std.BoundedArray(Node, MAX_DEPTH) = .{};
+        var left = self;
+        rootToLeft.append(left) catch unreachable;
+        for (0..h_left - h_right) |_| {
+            std.debug.assert(left.numKidsOrBytes() > 0);
+            const left_kids = left.assertExtractInner();
+            left = left_kids.get(left_kids.len - 1).value.*;
+            rootToLeft.append(left) catch
+                panicAndExit("Can't append, depth too high!\n", .{rootToLeft});
+        }
+
+        // Check that we got the correct height:
+        std.debug.assert(left.height() == right.height());
+
+        // TODO! We are at line 178 of the python code. Think about
+        // what to do with the refcounts! Should rootToLeft contain
+        // rc? but self can't be rc!
+
+        //_ = rootToLeft;
+        // _ = self;
+        // _ = other;
+        _ = alloc;
+        unreachable;
+    }
+
+    fn concatWithHigher(self: @This(), other: @This(), alloc: std.mem.Allocator) !rc.Rc(@This()) {
         _ = self;
         _ = other;
         _ = alloc;
@@ -298,7 +365,7 @@ pub const Node = struct {
                 while (row > 0) {
                     const line_break = std.mem.indexOfScalarPos(u8, bytes, curr_line_start, '\n');
                     if (line_break) |lbp| {
-                        curr_line_start  = lbp+1;
+                        curr_line_start = lbp + 1;
                         row -= 1;
                     } else {
                         // Searching for a line beyond this subtree.
@@ -327,7 +394,7 @@ pub const Node = struct {
             },
             .inner => |inner_p| {
                 const kids: []const rc.Rc(Node) = inner_p.slice();
-                var start = Pos {.col=0, .row=0};
+                var start = Pos{ .col = 0, .row = 0 };
                 var bytes_in_kids: usize = 0;
                 for (kids) |kid| {
                     const kid_agg = kid.value.*.agg;
@@ -341,17 +408,16 @@ pub const Node = struct {
                                 (kid_agg.last_newline_pos orelse unreachable);
                         }
                     };
-                    const end = Pos {.row = start.row + kid_agg.num_newlines,
-                                     .col = end_col};
+                    const end = Pos{ .row = start.row + kid_agg.num_newlines, .col = end_col };
                     if (start.lexLe(p) and p.lexLt(end)) {
                         const kid_p = blk: {
                             if (p.row == start.row) {
-                                break :blk Pos {.row = 0, .col = p.col - start.col};
+                                break :blk Pos{ .row = 0, .col = p.col - start.col };
                             } else {
                                 // To tired to think about this; it's
                                 // in the python code.
                                 std.debug.assert(p.row > start.row);
-                                break :blk Pos {.row = p.row - start.row, .col=p.col};
+                                break :blk Pos{ .row = p.row - start.row, .col = p.col };
                             }
                         };
                         return bytes_in_kids + try kid.value.*.posToOffset(kid_p);
@@ -360,7 +426,7 @@ pub const Node = struct {
                     bytes_in_kids += kid_agg.num_bytes;
                 }
                 return PosError.InvalidPos;
-            }
+            },
         }
     }
 };
@@ -395,9 +461,14 @@ fn innerNodeForTest(alloc: std.mem.Allocator) !rc.Rc(Node) {
     return try rc.Rc(Node).init(alloc, inner_node);
 }
 
+fn cleanUpNode(node: rc.Rc(Node)) void {
+    node.value.*.deinit();
+    node.release();
+}
+
 test "can create leaf node with refcount no leaks" {
     const node = try leafNodeForTest(std.testing.allocator);
-    defer node.release();
+    cleanUpNode(node);
 }
 
 test "leaf node height is 0" {
@@ -417,8 +488,7 @@ test "parent node height is 1" {
 
 test "can create inner node no leaks" {
     const inner: rc.Rc(Node) = try innerNodeForTest(std.testing.allocator);
-    defer inner.release();
-    defer inner.value.*.deinit();
+    cleanUpNode(inner);
 }
 
 test "numKidsOrBytes leaf is num bytes" {
@@ -439,16 +509,14 @@ test "numKidsOrBytes inner is num kids" {
 
 test "can call fromSlice on short slice no leaks" {
     const some_bytes_shorter = "abc";
-    var node = try Node.fromSlice(some_bytes_shorter, std.testing.allocator);
-    defer node.release();
-    defer node.value.*.deinit();
+    const node = try Node.fromSlice(some_bytes_shorter, std.testing.allocator);
+    cleanUpNode(node);
 }
 
 test "can call fromSlice on longer slice no leaks" {
     const some_bytes_longer = "test string with \n some newlines \n definitely over \n 16 chars";
-    var node = try Node.fromSlice(some_bytes_longer, std.testing.allocator);
-    defer node.release();
-    defer node.value.*.deinit();
+    const node = try Node.fromSlice(some_bytes_longer, std.testing.allocator);
+    cleanUpNode(node);
 }
 
 test "can call iterator and next" {
@@ -460,9 +528,8 @@ test "can call iterator and next" {
 
 test "iterator returns correct values for short text" {
     const text = "abc";
-    var node = try Node.fromSlice(text, std.testing.allocator);
-    defer node.release();
-    defer node.value.*.deinit();
+    const node = try Node.fromSlice(text, std.testing.allocator);
+    defer cleanUpNode(node);
 
     var iter = node.value.*.allBytesIterator();
     for (text) |expected| {
@@ -483,9 +550,8 @@ const longer_text =
 ;
 
 test "iterator returns correct values for longer text" {
-    var node = try Node.fromSlice(longer_text, std.testing.allocator);
-    defer node.release();
-    defer node.value.*.deinit();
+    const node = try Node.fromSlice(longer_text, std.testing.allocator);
+    defer cleanUpNode(node);
 
     var iter = node.value.*.allBytesIterator();
     for (longer_text) |expected| {
@@ -529,14 +595,14 @@ fn debugCheck(node: *const Node, expected_height: usize) void {
 }
 
 const PosIterator = struct {
-    slice: [] const u8,
+    slice: []const u8,
     idx: usize = 0,
     row: usize = 0,
     col: usize = 0,
 
     fn next(self: *@This()) ?Pos {
         if (self.idx >= self.slice.len) return null;
-        const res = .{.row = self.row, .col = self.col};
+        const res = .{ .row = self.row, .col = self.col };
         if (self.slice[self.idx] == '\n') {
             self.row += 1;
             self.col = 0;
@@ -550,11 +616,10 @@ const PosIterator = struct {
 
 test "pos to index in matches PosIterator" {
     const node_p = try Node.fromSlice(longer_text, std.testing.allocator);
-    defer node_p.release();
-    defer node_p.value.*.deinit();
+    defer cleanUpNode(node_p);
 
     const node: Node = node_p.value.*;
-    var it = PosIterator {.slice=longer_text};
+    var it = PosIterator{ .slice = longer_text };
 
     for (longer_text, 0..) |_, i| {
         const p = it.next() orelse unreachable;
@@ -568,29 +633,39 @@ test "pos to index in matches PosIterator" {
 
 test "posToIndex returns error on invalid col in line" {
     const node_p = try Node.fromSlice(longer_text, std.testing.allocator);
-    defer node_p.release();
-    defer node_p.value.*.deinit();
+    defer cleanUpNode(node_p);
 
     const node: Node = node_p.value.*;
-    try expect(node.posToOffset(.{.row=0, .col=100000}) == Node.PosError.InvalidPos);
+    try expect(node.posToOffset(.{ .row = 0, .col = 100000 }) == Node.PosError.InvalidPos);
 }
 
 test "posToIndex returns error on invalid line in text" {
     const node_p = try Node.fromSlice(longer_text, std.testing.allocator);
-    defer node_p.release();
-    defer node_p.value.*.deinit();
+    defer cleanUpNode(node_p);
 
     const node: Node = node_p.value.*;
-    try expect(node.posToOffset(.{.row=10000000, .col=0}) == Node.PosError.InvalidPos);
+    try expect(node.posToOffset(.{ .row = 10000000, .col = 0 }) == Node.PosError.InvalidPos);
 }
 
-
 test "fromSlice tree is balanced and has correct agg" {
-    var node = try Node.fromSlice(longer_text, std.testing.allocator);
-    defer node.release();
-    defer node.value.*.deinit();
+    const node = try Node.fromSlice(longer_text, std.testing.allocator);
+    defer cleanUpNode(node);
 
     const height = node.value.*.height();
 
     debugCheck(node.value, height);
+}
+
+test "print max depth" {
+    // Apparently it's 21 when B is 4 and MAX_DEPTH=11 when B is 16.
+    std.debug.print("MAX_DEPTH: {}\n", .{MAX_DEPTH});
+}
+
+test "can call concat" {
+    const node_p = try Node.fromSlice(longer_text, std.testing.allocator);
+    defer cleanUpNode(node_p);
+
+    const node = node_p.value.*;
+    const new_node_p = try node.concat(node, std.testing.allocator);
+    cleanUpNode(new_node_p);
 }
