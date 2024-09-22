@@ -1,8 +1,10 @@
 //! rope, Rope data structure implementation and tests.
+// TODO: make inner into RcArray!
 const std = @import("std");
-const rc = @import("zigrc");
+const Rc = @import("zigrc").Rc;
 
-const BRANCH_FACTOR = 16;
+/// TODO error with BRANCH_FACTOR=2!!!
+const BRANCH_FACTOR = 6;
 
 /// Max depth is enough to store 1TB data. Used for Iterator
 /// stack-based recursion. NOTE that the tree need not use the full
@@ -11,7 +13,7 @@ const BRANCH_FACTOR = 16;
 const MAX_DEPTH: comptime_int = blk: {
     // 1TB = 10**12 bytes.
     const maxFileSizeBytes: comptime_int = std.math.powi(usize, 10, 12) catch unreachable;
-    break :blk std.math.log_int(comptime_int, BRANCH_FACTOR, maxFileSizeBytes) + 2;
+    break :blk std.math.log_int(usize, BRANCH_FACTOR, maxFileSizeBytes) + 2;
 };
 
 /// For convenient indexing inside a Rope. Refers to a row, col
@@ -50,6 +52,7 @@ pub const Node = struct {
         num_bytes: usize,
         last_newline_pos: ?usize,
 
+        /// Agg info of empty slice. Equivalent to AggregateStats.fromSlice(.{})
         fn empty() @This() {
             return .{ .num_newlines = 0, .num_bytes = 0, .last_newline_pos = null };
         }
@@ -66,6 +69,17 @@ pub const Node = struct {
             return .{ .num_newlines = num_newlines, .num_bytes = slice.len, .last_newline_pos = last_newline_pos };
         }
 
+        test "empty matches fromSlices" {
+            const empty_agg = @This().empty();
+            const empty_slice: []const u8 = "";
+            const empty_from_slice = @This().fromSlice(empty_slice);
+            try expect(empty_agg.num_newlines == empty_from_slice.num_newlines);
+            try expect(empty_agg.num_bytes == empty_from_slice.num_bytes);
+            try expect(empty_agg.last_newline_pos == empty_from_slice.last_newline_pos);
+        }
+
+        /// Aggregation function - given add info of strings A and B,
+        /// computes info of A ++ B.
         fn combine(self: *const @This(), other: @This()) @This() {
             const last_newline_pos = blk: {
                 if (other.last_newline_pos) |lnp| {
@@ -88,7 +102,9 @@ pub const Node = struct {
     };
 
     const Leaf = std.BoundedArray(u8, BRANCH_FACTOR);
-    const Inner = std.BoundedArray(rc.Rc(Node), BRANCH_FACTOR);
+    // TODO: change to RcArray(BRANCH_FACTOR). Bigg-ish change,
+    // affects refcount handling.
+    const Inner = std.BoundedArray(Rc(Node), BRANCH_FACTOR);
 
     agg: AggregateStats,
     node: union(NodeTag) {
@@ -187,7 +203,7 @@ pub const Node = struct {
         }
     }
 
-    pub fn fromSlice(slice: []const u8, alloc: std.mem.Allocator) !rc.Rc(Node) {
+    pub fn fromSlice(slice: []const u8, alloc: std.mem.Allocator) !Rc(Node) {
         // Compute depth of resulting tree; needed to make sure all
         // leafs will be on the same level.
         var depth: usize = 0;
@@ -199,7 +215,7 @@ pub const Node = struct {
         return fromSliceDepth(slice, depth, alloc);
     }
 
-    fn fromSliceDepth(slice: []const u8, depth: usize, alloc: std.mem.Allocator) !rc.Rc(Node) {
+    fn fromSliceDepth(slice: []const u8, depth: usize, alloc: std.mem.Allocator) !Rc(Node) {
         // Assert that the slice will fit in a tree of the target depth.
         const max_size: usize = try std.math.powi(usize, BRANCH_FACTOR, depth + 1);
         std.debug.assert(slice.len <= max_size);
@@ -209,17 +225,17 @@ pub const Node = struct {
             const leaf = Leaf.fromSlice(slice) catch unreachable;
             const agg = AggregateStats.fromSlice(slice);
             const n = Node{ .node = .{ .leaf = leaf }, .agg = agg };
-            var res = try rc.Rc(Node).init(alloc, n);
+            var res = try Rc(Node).init(alloc, n);
 
             // All leafs must be on the same level; From this, it
             // follows that we sometimes need a chain
             // node--node--node--leaf. This loop adds the chain of
             // parent nodes to reach the target depth.
             for (0..depth) |_| {
-                const res_kid: [1]rc.Rc(Node) = .{res};
+                const res_kid: [1]Rc(Node) = .{res};
                 const res_inner = try Inner.fromSlice(&res_kid);
                 const res_node = Node{ .node = .{ .inner = res_inner }, .agg = agg };
-                res = try rc.Rc(Node).init(alloc, res_node);
+                res = try Rc(Node).init(alloc, res_node);
             }
             std.debug.assert(res.value.*.height() == depth);
             return res;
@@ -241,7 +257,7 @@ pub const Node = struct {
             agg = agg.combine(kid.value.*.agg);
         }
         const n = Node{ .node = .{ .inner = inner }, .agg = agg };
-        return try rc.Rc(Node).init(alloc, n);
+        return try Rc(Node).init(alloc, n);
     }
 
     /// For (rather slowly) iterating though all bytes in the tree
@@ -261,27 +277,134 @@ pub const Node = struct {
     /// other.height()))` new nodes. Returns a refcounted pointer to
     /// the new tree. To release the memory, do `result.deinit()` for
     /// recursively decreasing refcounts, and then `result.release()`.
-    pub fn concat(self: @This(), other: @This(), alloc: std.mem.Allocator) !rc.Rc(@This()) {
+    pub fn concat(self: Node, other: Rc(Node), alloc: std.mem.Allocator) !Rc(Node) {
         if (self.agg.num_bytes == 0) {
-            return try rc.Rc(Node).init(alloc, other);
+            var o = other;
+            return o.retain();
         }
-        if (other.agg.num_bytes == 0) {
-            return try rc.Rc(Node).init(alloc, self);
+        if (other.value.*.agg.num_bytes == 0) {
+            const self_rc = Rc(Node).init(alloc, self);
+            return self_rc;
         }
 
-        if (self.height() >= other.height()) {
-            return self.concatWithLower(other, alloc);
+        var self_p: Rc(Node) = try Rc(Node).init(alloc, self);
+        defer self_p.release(); // Only release this frame's ptr to
+                                // the node to prevent memory leaks.
+
+        if (self.height() >= other.value.*.height()) {
+            return Node.concatWithLower(self_p, other, alloc);
         } else {
-            return self.concatWithHigher(other, alloc);
+            return Node.concatWithHigher(self_p, other, alloc);
         }
     }
 
     /// Crashes on failure. Maybe make an error?
-    fn assertExtractInner(self: @This()) Inner {
+    fn assertExtractInner(self: Node) Inner {
         switch (self.node) {
             .inner => |inner_v| return inner_v,
             .leaf => panicAndExit("Logic error, we thought this was an inner node", .{self}),
         }
+    }
+
+    /// Crashes on failure. Maybe make an error?
+    fn assertExtractLeaf(self: Node) Leaf {
+        switch (self.node) {
+            .inner => |_| panicAndExit("Logic error, we thought this was a leaf", .{self}),
+            .leaf => |leaf_v| return leaf_v,
+        }
+    }
+
+
+    /// Create new node with a single kid `kid`. Increases the
+    /// refcount of `kid`, since there will be a pointer to it from a
+    /// new node.
+    fn wrapKidWithParent(kid: Rc(Node), alloc: std.mem.Allocator) !Rc(Node) {
+        var inner = try Node.Inner.init(1);
+        var kid_mut = kid;
+        inner.set(0, kid_mut.retain());
+        const inner_node = Node{ .node = .{ .inner = inner }, .agg = Node.AggregateStats.empty() };
+        return try Rc(Node).init(alloc, inner_node);
+    }
+
+    /// Wrapping struct around BoundedArray(Rc) for keeping track of
+    /// refcounts. Increases on push, decreases on pop.
+    fn RcArray(sz: usize) type {
+        return struct {
+            arr: std.BoundedArray(Rc(Node), sz) = .{},
+
+            fn release(self: *@This()) void {
+                while (self.arr.len > 0) {
+                    self.pop();
+                }
+            }
+
+            fn push(self: *@This(), n: Rc(Node)) !void {
+                var n_copy = n;
+                try self.arr.append(n_copy.retain());
+
+            }
+
+            // Don't return the value because it might have been released.
+            fn pop(self: *@This()) void {
+                std.debug.assert(self.arr.len > 0);
+                var popped = self.arr.pop();
+                popped.release();
+            }
+
+            fn top(self: *const @This()) Rc(Node) {
+                std.debug.assert(self.arr.len > 0);
+                return self.arr.get(self.arr.len-1);
+            }
+        };
+    }
+
+
+    /// Makes a new node out of the kids of `a` and `b`. Asserts that
+    /// combined kid/array sizes fit in BRANCH_FACTOR, and that `a`,
+    /// `b` have same node type. Result has refcount of ONE; caller is
+    /// responsible for releasing.
+    fn merge(a: Node, b: Node, alloc: std.mem.Allocator) !Rc(Node) {
+        std.debug.assert(a.numKidsOrBytes() + b.numKidsOrBytes() <= BRANCH_FACTOR);
+        std.debug.assert(a.height() == b.height());
+        std.debug.assert(b: {
+            const a_tag: NodeTag = a.node;
+            const b_tag: NodeTag = b.node;
+            break :b a_tag == b_tag;
+        });
+
+        // Should be possible to remove duplication with comptime. TODO!
+        switch (a.node) {
+            .leaf => |a_leaf| {
+                const b_leaf: Leaf = b.assertExtractLeaf();
+                var res_leaf: Leaf = .{};
+                for (a_leaf.slice()) |p| {
+                    res_leaf.append(p) catch unreachable;
+                }
+                for (b_leaf.slice()) |p| {
+                    res_leaf.append(p) catch unreachable;
+                }
+                const agg = AggregateStats.fromSlice(res_leaf.slice());
+                const res = Node {.agg=agg, .node = .{.leaf = res_leaf }, };
+                return try Rc(Node).init(alloc, res);
+            },
+            .inner => |a_inner| {
+                const b_inner: Inner = b.assertExtractInner();
+                var res_inner: Inner = .{};
+                for (a_inner.slice()) |p| {
+                    res_inner.append(p) catch unreachable;
+                }
+                for (b_inner.slice()) |p| {
+                    res_inner.append(p) catch unreachable;
+                }
+                var agg = AggregateStats.empty();
+                for (res_inner.slice()) |p| {
+                    agg = agg.combine(p.value.*.agg);
+                }
+                const res: Node = .{.agg=agg, .node = .{.inner = res_inner}};
+                return try Rc(Node).init(alloc, res);
+            }
+        }
+
     }
 
     /// Concatenation implementation, left big with right small. Also
@@ -295,43 +418,139 @@ pub const Node = struct {
     /// the chain until you find a node that can be merged with the
     /// right side, then merge and create a new chain or
     /// parents. Sometimes the resulting tree height increases by 1.
-    fn concatWithLower(self: @This(), right: @This(), alloc: std.mem.Allocator) !rc.Rc(@This()) {
-        const h_right = self.height();
-        const h_left = right.height();
+    fn concatWithLower(left_p: Rc(Node), right_p: Rc(Node), alloc: std.mem.Allocator) !Rc(Node) {
+        const h_right = left_p.value.*.height();
+        const h_left = right_p.value.*.height();
         std.debug.assert(h_right >= h_right);
 
         // Terminology: left merge node - the rightmost node of the
         // left tree which is at the same level as the right root.
 
-        // Constructs a chain of nodes from the root to the left
-        // merge node inclusive.
-        var rootToLeft: std.BoundedArray(Node, MAX_DEPTH) = .{};
-        var left = self;
-        rootToLeft.append(left) catch unreachable;
+        // Step (1): construct a chain of nodes from the root to the left merge
+        // node inclusive. Refcounts are incremented for things we put
+        // in the array and freed on
+        //var rootToLeftUnmanaged: std.BoundedArray(Rc(Node), MAX_DEPTH) = .{};
+        var rootToLeft: RcArray(MAX_DEPTH) = .{};
+        defer rootToLeft.release();
+
+        // No new Rc are created in this block. We don't co-own `left`
+        // so it's never retained/released.
+        var left: Rc(Node) = left_p;
+
+        rootToLeft.push(left) catch unreachable;
         for (0..h_left - h_right) |_| {
-            std.debug.assert(left.numKidsOrBytes() > 0);
-            const left_kids = left.assertExtractInner();
-            left = left_kids.get(left_kids.len - 1).value.*;
-            rootToLeft.append(left) catch
+            std.debug.assert(left.value.*.numKidsOrBytes() > 0);
+            const left_kids: Inner = left.value.*.assertExtractInner();
+            left = left_kids.get(left_kids.len - 1);
+            rootToLeft.push(left) catch
                 panicAndExit("Can't append, depth too high!\n", .{rootToLeft});
         }
 
         // Check that we got the correct height:
-        std.debug.assert(left.height() == right.height());
+        std.debug.assert(left.value.*.height() == right_p.value.*.height());
+
+
+        // Step (2): pad the right node with a bunch of parents until
+        // it can be merged with the left node. Pop from rootToLeft so
+        // that left=rootToLeft[-1] has the same height as right.
+
+        // We take co-ownership of `right` for this function. When we
+        // wrap `right` in parents, we will give away ownership to the parent.
+        var right: Rc(Node) = right_p;
+        _ = right.retain();
+        defer right.release();
+
+
+        std.debug.assert(rootToLeft.arr.len > 0);
+        while (rootToLeft.top().value.*.numKidsOrBytes() +
+                   right_p.value.*.numKidsOrBytes() > BRANCH_FACTOR) {
+
+            // Move ownership of the previous `right` into a newly
+            // created parent, and assign to `right`. Invariant: we
+            // still need to release `rigth` after this, which happens
+            // though the defer above.
+            right = b: {
+                var old_right = right;
+                const new_right = try Node.wrapKidWithParent(old_right, alloc);
+                old_right.release();
+                break :b new_right;
+            };
+            if (rootToLeft.arr.len == 1) {
+                const newParent = try Node.wrapKidWithParent(rootToLeft.top(), alloc);
+                // Move ownership of `newParent` to `rootToLeft`.
+                defer {var np = newParent; np.release();}
+                rootToLeft.pop(); // Safe to release old top, as it's
+                                  // now co-owned by NewParent.
+                rootToLeft.push(newParent) catch unreachable;
+                // after this block, the sole owner is rootToLeft
+            } else {
+                rootToLeft.pop(); // releases ref to .top(), which is
+                                  // fine since it's owned by the
+                                  // parent anyway.
+            }
+        }
+
+        // At this point this function co-owns the pointers
+        // `rootToLeft` and `right`. `rootToLeft` has at least one
+        // element; `rootToLeft.top()` and `right` are merge-able.
+        std.debug.assert(rootToLeft.arr.len > 0);
+        std.debug.assert(rootToLeft.top().value.*.numKidsOrBytes() +
+                             right.value.*.numKidsOrBytes() <= BRANCH_FACTOR);
+
+        // NOTE: owned by this function, but returned from it.
+        var merged = try Node.merge(rootToLeft.top().value.*, right.value.*, alloc);
+        errdefer merged.release();
+        rootToLeft.pop();
+
+        // Step (3); go up the chain `rootToLeft` of parents, and
+        // re-create them with `merged` as the rightmost
+        // kid. Invariant: `rootToLeft` only contains .inner nodes.
+
+        // Convenient ordering: leftToRoot
+        std.mem.reverse(Rc(Node), rootToLeft.arr.slice());
+        //const leftToRoot = rootToLeft.arr.slice();
+
+        while (rootToLeft.arr.len > 0) {
+            const par: Node = b: {
+                const par_p  = rootToLeft.top();
+                const par: Node = par_p.value.*;
+                rootToLeft.pop(); // save to deallocate par_p
+                break :b par;
+            };
+
+            var par_kids = par.assertExtractInner();
+            std.debug.assert(par_kids.len > 0);
+
+            const rightmost = par_kids.pop();
+            // Don't release the kid; it's still owned by its tree.
+
+            std.debug.assert(rightmost.value.*.height() == merged.value.*.height());
+            // `merged` has refcount 1. This MOVES the ownership to
+            // `par_kids` without changing the refcount. Note that
+            // `merged` is overwritten below.
+            par_kids.append(merged) catch unreachable;
+
+            var par_agg = AggregateStats.empty();
+            for (par_kids.slice()) |kid| {
+                par_agg = par_agg.combine(kid.value.*.agg);
+            }
+            const new_par = Node {.agg = par_agg, .node = .{.inner = par_kids}};
+            merged = try Rc(Node).init(alloc, new_par);
+        }
 
         // TODO! We are at line 178 of the python code. Think about
         // what to do with the refcounts! Should rootToLeft contain
         // rc? but self can't be rc!
 
         //_ = rootToLeft;
-        // _ = self;
-        // _ = other;
-        _ = alloc;
-        unreachable;
+        //_ = self;
+        //_ = other;
+        //_ = alloc;
+        return merged;
     }
 
-    fn concatWithHigher(self: @This(), other: @This(), alloc: std.mem.Allocator) !rc.Rc(@This()) {
-        _ = self;
+    fn concatWithHigher(self_p: Rc(Node), other: Rc(Node), alloc: std.mem.Allocator) !Rc(Node) {
+        _ = self_p;
         _ = other;
         _ = alloc;
         unreachable;
@@ -393,7 +612,7 @@ pub const Node = struct {
                 return curr_line_start + p.col;
             },
             .inner => |inner_p| {
-                const kids: []const rc.Rc(Node) = inner_p.slice();
+                const kids: []const Rc(Node) = inner_p.slice();
                 var start = Pos{ .col = 0, .row = 0 };
                 var bytes_in_kids: usize = 0;
                 for (kids) |kid| {
@@ -414,8 +633,8 @@ pub const Node = struct {
                             if (p.row == start.row) {
                                 break :blk Pos{ .row = 0, .col = p.col - start.col };
                             } else {
-                                // To tired to think about this; it's
-                                // in the python code.
+                                // Too tired to think about this; it's
+                                // in the python code, and the tests pass.
                                 std.debug.assert(p.row > start.row);
                                 break :blk Pos{ .row = p.row - start.row, .col = p.col };
                             }
@@ -444,24 +663,33 @@ test "can create leaf node" {
 }
 
 /// Creates refcounted leaf node; should have a single strong pointer.
-fn leafNodeForTest(alloc: std.mem.Allocator) !rc.Rc(Node) {
+fn leafNodeForTest(alloc: std.mem.Allocator) !Rc(Node) {
     const leaf_content = "abc";
     const leaf = try Node.Leaf.fromSlice(leaf_content);
     const n = Node{ .node = .{ .leaf = leaf }, .agg = Node.AggregateStats.empty() };
-    return try rc.Rc(Node).init(alloc, n);
+    return try Rc(Node).init(alloc, n);
 }
 
 /// Creates a refcounted inner node with a single leaf node; both have
 /// 1 strong pointer each.
-fn innerNodeForTest(alloc: std.mem.Allocator) !rc.Rc(Node) {
+fn innerNodeForTest(alloc: std.mem.Allocator) !Rc(Node) {
     const leaf = try leafNodeForTest(alloc);
-    var inner = try Node.Inner.init(1);
-    inner.set(0, leaf);
-    const inner_node = Node{ .node = .{ .inner = inner }, .agg = Node.AggregateStats.empty() };
-    return try rc.Rc(Node).init(alloc, inner_node);
+
+    // release the kid pointer unconditionally, independently of
+    // whether parent allocation fails. If it succeeds, the leaf
+    // release will not deallocate the leaf, as parent creation
+    // increases the refcount.
+    defer leaf.release();
+    const parent = try Node.wrapKidWithParent(leaf, alloc);
+    return parent;
+
+    // var inner = try Node.Inner.init(1);
+    // inner.set(0, leaf);
+    // const inner_node = Node{ .node = .{ .inner = inner }, .agg = Node.AggregateStats.empty() };
+    // return try Rc(Node).init(alloc, inner_node);
 }
 
-fn cleanUpNode(node: rc.Rc(Node)) void {
+fn cleanUpNode(node: Rc(Node)) void {
     node.value.*.deinit();
     node.release();
 }
@@ -478,7 +706,7 @@ test "leaf node height is 0" {
 }
 
 test "parent node height is 1" {
-    const leaf: [1]rc.Rc(Node) = .{try leafNodeForTest(std.testing.allocator)};
+    const leaf: [1]Rc(Node) = .{try leafNodeForTest(std.testing.allocator)};
     const inner = try Node.Inner.fromSlice(&leaf);
     var parent_node = Node{ .node = .{ .inner = inner }, .agg = Node.AggregateStats.empty() };
     defer parent_node.deinit();
@@ -487,7 +715,7 @@ test "parent node height is 1" {
 }
 
 test "can create inner node no leaks" {
-    const inner: rc.Rc(Node) = try innerNodeForTest(std.testing.allocator);
+    const inner: Rc(Node) = try innerNodeForTest(std.testing.allocator);
     cleanUpNode(inner);
 }
 
@@ -499,7 +727,7 @@ test "numKidsOrBytes leaf is num bytes" {
 }
 
 test "numKidsOrBytes inner is num kids" {
-    const leaf: [1]rc.Rc(Node) = .{try leafNodeForTest(std.testing.allocator)};
+    const leaf: [1]Rc(Node) = .{try leafNodeForTest(std.testing.allocator)};
     const inner = try Node.Inner.fromSlice(&leaf);
     var inner_node = Node{ .node = .{ .inner = inner }, .agg = Node.AggregateStats.empty() };
     defer inner_node.deinit();
@@ -661,11 +889,36 @@ test "print max depth" {
     std.debug.print("MAX_DEPTH: {}\n", .{MAX_DEPTH});
 }
 
-test "can call concat" {
+fn recPrintRefcounts(node: Rc(Node), indent: usize) void {
+    for (0..indent) |_| {
+        std.debug.print("  ", .{});
+    }
+    const node_tag: Node.NodeTag = node.value.*.node;
+    std.debug.print("rc={} ptr=0x{x} {}\n", .{node.strongCount(), @intFromPtr(node.value), node_tag});
+    if (node_tag == .inner) {
+        for (node.value.*.assertExtractInner().slice()) |kid_p| {
+            recPrintRefcounts(kid_p, indent+1);
+        }
+    }
+
+}
+
+test "can call concat with empty" {
     const node_p = try Node.fromSlice(longer_text, std.testing.allocator);
     defer cleanUpNode(node_p);
 
-    const node = node_p.value.*;
-    const new_node_p = try node.concat(node, std.testing.allocator);
-    cleanUpNode(new_node_p);
+    const empty_node_p = try Node.fromSlice("", std.testing.allocator);
+    defer cleanUpNode(empty_node_p);
+
+    const concat_node_p = try node_p.value.*.concat(empty_node_p, std.testing.allocator);
+    defer cleanUpNode(concat_node_p);
+
+    std.debug.print("Refcounts: long root:\n", .{});
+    recPrintRefcounts(node_p, 0);
+
+    std.debug.print("Refcounts: empty leaf:\n", .{});
+    recPrintRefcounts(empty_node_p, 0);
+
+    std.debug.print("Refcounts: combined :\n", .{});
+    recPrintRefcounts(concat_node_p, 0);
 }
