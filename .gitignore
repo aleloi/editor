@@ -48,3 +48,15 @@ logs
 # *.txt
 # *.in
 # *.out
+
+# pyrightconfig
+pyrightconfig.json
+
+# local tests
+# proper tests should follow pattern
+#  tests/test_*.*
+*_test.zig
+*_test.py
+src/test_*.zig
+src/test_*.py
+src/python/test_*.py
