@@ -57,8 +57,7 @@ const AggregateStats = struct {
 
     test "empty matches fromSlices" {
         const empty_agg = @This().empty();
-        const empty_slice: []const u8 = "";
-        const empty_from_slice = @This().fromSlice(empty_slice);
+        const empty_from_slice = @This().fromSlice("");
         try expect(empty_agg.num_newlines == empty_from_slice.num_newlines);
         try expect(empty_agg.num_bytes == empty_from_slice.num_bytes);
         try expect(empty_agg.last_newline_pos == empty_from_slice.last_newline_pos);
@@ -206,23 +205,6 @@ pub fn NodeBF(branch_factor: comptime_int) type {
             }
         }
 
-        // / Recursively releases the refcounted kid pointers.
-        // pub fn deinit(self: *@This()) void {
-        //     switch (self.node) {
-        //         .leaf => |_| return,
-        //         .inner => |*kids| {
-
-        //             for (kids.*.slice()) |kid| {
-        //                 kid.value.*.deinit();
-        //                 kid.release();
-        //             }
-        //             kids.*.release();
-        //             // clear the content; BoundedArray.clear() is >=0.14 or something.
-        //             kids.*.len = 0;
-        //         },
-        //     }
-        // }
-
         pub fn fromSlice(slice: []const u8, alloc: std.mem.Allocator) !Rc(Self) {
             // Compute depth of resulting tree; needed to make sure all
             // leafs will be on the same level.
@@ -270,7 +252,7 @@ pub fn NodeBF(branch_factor: comptime_int) type {
             const max_piece_size: usize = @max(try std.math.divCeil(usize, slice.len, BRANCH_FACTOR), BRANCH_FACTOR);
             var piece_start: usize = 0;
             var inner: Inner = .{};
-            errdefer inner.release();
+            defer inner.release();
             while (piece_start < slice.len) {
                 const piece_end = @min(slice.len, piece_start + max_piece_size);
                 var node_rc = try Self.fromSliceDepth(slice[piece_start..piece_end], depth - 1, alloc);
@@ -279,12 +261,7 @@ pub fn NodeBF(branch_factor: comptime_int) type {
                 piece_start = piece_end;
             }
 
-            var agg: AggregateStats = AggregateStats.empty();
-            for (inner.arr.slice()) |kid| {
-                agg = agg.combine(kid.value.*.agg);
-            }
-            const n = Self{ .node = .{ .inner = inner }, .agg = agg };
-            return try Rc(Self).init(alloc, n);
+            return try Self.innerFromSlice(inner.arr.slice(), alloc);
         }
 
         /// For (rather slowly) iterating though all bytes in the tree
@@ -327,6 +304,59 @@ pub fn NodeBF(branch_factor: comptime_int) type {
             }
         }
 
+
+
+        pub fn splitAt(self: Rc(Self), offset: usize, alloc: std.mem.Allocator) !struct {
+            fst: Rc(Self),
+            snd: Rc(Self)
+        } {
+            if (offset > self.value.*.agg.num_bytes) {
+                return error.InvalidPos;
+            }
+            switch (self.value.*.node) {
+                .leaf => |leaf_v| {
+                    var fst = try Self.fromSlice(leaf_v.slice()[0..offset], alloc);
+                    errdefer fst.release();
+
+                    const snd = try Self.fromSlice(leaf_v.slice()[offset..], alloc);
+                    return .{.fst=fst, .snd=snd};
+                },
+
+                .inner => |inner_v| {
+                    var start: usize = 0;
+                    const kids = inner_v.arr.slice();
+                    for (kids, 0..) |kid, i| {
+                        const kid_size: usize = kid.value.*.agg.num_bytes;
+                        if (start <= offset and offset <= kid_size) {
+                            var kid_split = try splitAt(kid, offset - start, alloc);
+                            errdefer kid_split.fst.releaseWithFn(Self.deinit);
+                            errdefer kid_split.snd.releaseWithFn(Self.deinit);
+                            //_ = i;
+                            var a = if (i > 0) try Self.innerFromSlice(
+                                kids[0..i], alloc) else try Self.fromSlice("", alloc);
+                            errdefer a.releaseWithFn(Self.deinit);
+
+                            const b = if (i+1 < kids.len) try Self.innerFromSlice(
+                                kids[(i+1)..], alloc) else try Self.fromSlice("", alloc);
+
+                            //a: Node = Inner.from_kids(kids[:i]) if i > 0 else Leaf.from_bytes(b'')
+                            //b: Node = Inner.from_kids(kids[i+1:]) if kids[i+1:] else Leaf.from_bytes(b'')
+                            var a_kid_a = try Self.concat(a, kid_split.fst, alloc);
+                            errdefer a_kid_a.releaseWithFn(Self.deinit);
+
+                            const kid_b_b = try Self.concat(kid_split.snd, b, alloc);
+                            return .{.fst=a_kid_a,
+                                     .snd = kid_b_b};
+
+                        }
+                        start += kid_size;
+                    }
+                    unreachable;
+                }
+            }
+            unreachable;
+        }
+
         /// Crashes on failure. Maybe make an error?
         fn assertExtractInner(self: Self) Inner {
             switch (self.node) {
@@ -343,17 +373,24 @@ pub fn NodeBF(branch_factor: comptime_int) type {
             }
         }
 
+        /// Takes co-ownership of the kids on success.
+        fn innerFromSlice(kids: []const Rc(Self), alloc: std.mem.Allocator) !Rc(Self) {
+            std.debug.assert(kids.len <= BRANCH_FACTOR);
+             std.debug.assert(kids.len > 0);
+            var inner = try Self.Inner.fromSlice(kids);
+            errdefer inner.release();
 
-        /// Create new node with a single kid `kid`. Increases the
-        /// refcount of `kid`, since there will be a pointer to it from a
-        /// new node.
-        fn wrapKidWithParent(kid: Rc(Self), alloc: std.mem.Allocator) !Rc(Self) {
-            var inner = Self.Inner {}; //.init(1);
-            try inner.push(kid);
-            errdefer inner.release(); // If the allocation doesn't work, don't increase the kid refcount.
-            const inner_node = Self{ .node = .{ .inner = inner }, .agg = kid.value.*.agg };
-            return try Rc(Self).init(alloc, inner_node);
+            var agg = AggregateStats.empty();
+
+            for (kids) |kid| {
+                agg = agg.combine(kid.value.*.agg);
+            }
+
+            return try Rc(Self).init(
+                alloc,
+                Self {.node = .{.inner = inner}, .agg = agg});
         }
+
 
         /// Wrapping struct around BoundedArray(Rc) for keeping track of
         /// refcounts. Increases on push, decreases on pop.
@@ -361,11 +398,12 @@ pub fn NodeBF(branch_factor: comptime_int) type {
             return struct {
                 arr: std.BoundedArray(Rc(Self), sz) = .{},
 
-                fn fromSlice(kids: []Rc(Self)) @This() {
+                fn fromSlice(kids: []const Rc(Self)) !@This() {
                     var res: @This() = .{};
                     for (kids) |kid| {
-                        res.push(kid);
+                        try res.push(kid);
                     }
+                    return res;
                 }
 
                 fn release(self: *@This()) void {
@@ -434,19 +472,14 @@ pub fn NodeBF(branch_factor: comptime_int) type {
                 .inner => |a_inner| {
                     const b_inner: Inner = b.assertExtractInner();
                     var res_inner: Inner = .{};
-                    errdefer res_inner.release();
+                    defer res_inner.release();
                     for (a_inner.arr.slice()) |p| {
                         res_inner.push(p) catch unreachable;
                     }
                     for (b_inner.arr.slice()) |p| {
                         res_inner.push(p) catch unreachable;
                     }
-                    var agg = AggregateStats.empty();
-                    for (res_inner.arr.slice()) |p| {
-                        agg = agg.combine(p.value.*.agg);
-                    }
-                    const res: Self = .{.agg=agg, .node = .{.inner = res_inner}};
-                    return try Rc(Self).init(alloc, res);
+                    return try Self.innerFromSlice(res_inner.arr.slice(), alloc);
                 }
             }
 
@@ -518,13 +551,14 @@ pub fn NodeBF(branch_factor: comptime_int) type {
                 // though the defer above.
                 right = b: {
                     var old_right = right;
-                    const new_right = try Self.wrapKidWithParent(old_right, alloc);
+                    const new_right = try innerFromSlice(&.{old_right}, alloc);
+
                     // Now old_right is at N+2
                     old_right.releaseWithFn(Self.deinit); // back at N+1
                     break :b new_right;
                 };
                 if (rootToLeft.arr.len == 1) {
-                    const newParent = try Self.wrapKidWithParent(rootToLeft.top(), alloc);
+                    const newParent = try innerFromSlice(&.{rootToLeft.top()}, alloc);
                     // Move ownership of `newParent` to `rootToLeft`.
                     defer {var np = newParent; np.releaseWithFn(Self.deinit);}
                     rootToLeft.pop(); // Safe to release old top, as it's
@@ -607,7 +641,7 @@ pub fn NodeBF(branch_factor: comptime_int) type {
             while (rootToLeft.arr.len > 0) {
                 // Clone
                 var par_kids: RcArray(BRANCH_FACTOR)  = rootToLeft.top().value.*.assertExtractInner().clone();
-                errdefer par_kids.release();
+                defer par_kids.release();
                 rootToLeft.pop();
 
                 std.debug.assert(par_kids.arr.len > 0);
@@ -656,13 +690,14 @@ pub fn NodeBF(branch_factor: comptime_int) type {
                 // `par_kids` without changing the refcount. Note that
                 // `merged` is overwritten below.
                 //par_kids.push(merged) catch unreachable;
+                merged = try Self.innerFromSlice(par_kids.arr.slice(), alloc);
 
-                var par_agg = AggregateStats.empty();
-                for (par_kids.arr.slice()) |kid| {
-                    par_agg = par_agg.combine(kid.value.*.agg);
-                }
-                const new_par = Self {.agg = par_agg, .node = .{.inner = par_kids}};
-                merged = try Rc(Self).init(alloc, new_par);
+                // var par_agg = AggregateStats.empty();
+                // for (par_kids.arr.slice()) |kid| {
+                //     par_agg = par_agg.combine(kid.value.*.agg);
+                // }
+                // const new_par = Self {.agg = par_agg, .node = .{.inner = par_kids}};
+                // merged = try Rc(Self).init(alloc, new_par);
                 debugCheck(merged.value, merged.value.*.height());
             }
 
@@ -856,7 +891,7 @@ fn innerNodeForTest(alloc: std.mem.Allocator) !Rc(Node) {
     // release will not deallocate the leaf, as parent creation
     // increases the refcount.
     defer leaf.releaseWithFn(Node.deinit);
-    const parent = try Node.wrapKidWithParent(leaf, alloc);
+    const parent = try Node.innerFromSlice(&.{leaf}, alloc);
     return parent;
 
     // var inner = try Node.Inner.init(1);
@@ -1355,3 +1390,37 @@ test "concat doesn't leak at allocator failure" {
         //std.debug.print("\n\n\n", .{});
     }
 }
+
+
+test "Can split ab" {
+    //@setEvalBranchQuota(10000);
+    const node = try Node.fromSlice("ab", std.testing.allocator);
+    defer node.releaseWithFn(Node.deinit);
+    const splt = try Node.splitAt(node, 1, std.testing.allocator);
+    defer splt.fst.releaseWithFn(Node.deinit);
+    defer splt.snd.releaseWithFn(Node.deinit);
+
+    try expect(splt.fst.value.*.agg.num_bytes == 1);
+    try expect(splt.snd.value.*.agg.num_bytes == 1);
+}
+
+
+test "splits ab into a and b" {
+    //@setEvalBranchQuota(10000);
+    const node = try Node.fromSlice("ab", std.testing.allocator);
+    defer node.releaseWithFn(Node.deinit);
+    const splt = try Node.splitAt(node, 1, std.testing.allocator);
+    defer splt.fst.releaseWithFn(Node.deinit);
+    defer splt.snd.releaseWithFn(Node.deinit);
+
+    var a_iter = splt.fst.value.*.allBytesIterator();
+    var b_iter = splt.snd.value.*.allBytesIterator();
+
+    try expect(a_iter.next() == 'a');
+    try expect(a_iter.next() == null);
+
+    try expect(b_iter.next() == 'b');
+    try expect(b_iter.next() == null);
+}
+
+
