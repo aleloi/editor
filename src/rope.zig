@@ -2,8 +2,6 @@
 const std = @import("std");
 const Rc = @import("zigrc").Rc;
 
-//const BRANCH_FACTOR = 7;
-
 
 /// For convenient indexing inside a Rope. Refers to a row, col
 /// position relative to a root node. The first byte is always `row=0,
@@ -29,7 +27,7 @@ fn panicAndExit(info: []const u8, extra: anytype) noreturn {
     std.process.exit(1);
 }
 
-pub const Node = NodeBF(7);
+pub const Node = NodeBF(13);
 
 /// Every tree node contains aggregate stats for all bytes in its
 /// descendents.
@@ -106,9 +104,7 @@ pub fn NodeBF(branch_factor: comptime_int) type {
         };
 
         const Leaf = std.BoundedArray(u8, BRANCH_FACTOR);
-        // TODO: change to RcArray(BRANCH_FACTOR). Bigg-ish change,
-        // affects refcount handling.
-        const Inner = RcArray(BRANCH_FACTOR); //std.BoundedArray(Rc(Node), BRANCH_FACTOR);
+        const Inner = RcArray(BRANCH_FACTOR);
 
         agg: AggregateStats,
         node: union(NodeTag) {
@@ -124,10 +120,6 @@ pub fn NodeBF(branch_factor: comptime_int) type {
         /// recursive copy-memory function?
         const Iterator = struct {
             rec_stack: std.BoundedArray(struct { node: *const Self, kid_index: usize }, MAX_DEPTH),
-
-            // node: *const Self,
-            // kid_index: usize,
-            // kid_iterator: ?*Iterator,
 
             fn next(self: *@This()) ?u8 {
                 if (self.rec_stack.len == 0) {
@@ -255,7 +247,7 @@ pub fn NodeBF(branch_factor: comptime_int) type {
             defer inner.release();
             while (piece_start < slice.len) {
                 const piece_end = @min(slice.len, piece_start + max_piece_size);
-                var node_rc = try Self.fromSliceDepth(slice[piece_start..piece_end], depth - 1, alloc);
+                const node_rc = try Self.fromSliceDepth(slice[piece_start..piece_end], depth - 1, alloc);
                 try inner.push(node_rc);
                 node_rc.releaseWithFn(Self.deinit);
                 piece_start = piece_end;
@@ -297,7 +289,7 @@ pub fn NodeBF(branch_factor: comptime_int) type {
             //defer self_p.release(); // Only release this frame's ptr to
             // the node to prevent memory leaks.
 
-            if (self.value.*.height() >= other.value.*.height()) {
+            if (self.value.*.height() > other.value.*.height()) {
                 return Self.concatWithLower(self, other, alloc);
             } else {
                 return Self.concatWithHigher(self, other, alloc);
@@ -327,21 +319,20 @@ pub fn NodeBF(branch_factor: comptime_int) type {
                     const kids = inner_v.arr.slice();
                     for (kids, 0..) |kid, i| {
                         const kid_size: usize = kid.value.*.agg.num_bytes;
-                        if (start <= offset and offset <= kid_size) {
-                            var kid_split = try splitAt(kid, offset - start, alloc);
-                            errdefer kid_split.fst.releaseWithFn(Self.deinit);
-                            errdefer kid_split.snd.releaseWithFn(Self.deinit);
-                            //_ = i;
-                            var a = if (i > 0) try Self.innerFromSlice(
+                        if (start <= offset and offset <= start + kid_size) {
+                            const kid_split = try splitAt(kid, offset - start, alloc);
+                            defer kid_split.fst.releaseWithFn(Self.deinit);
+                            defer kid_split.snd.releaseWithFn(Self.deinit);
+
+                            const a = if (i > 0) try Self.innerFromSlice(
                                 kids[0..i], alloc) else try Self.fromSlice("", alloc);
-                            errdefer a.releaseWithFn(Self.deinit);
+                            defer a.releaseWithFn(Self.deinit);
 
                             const b = if (i+1 < kids.len) try Self.innerFromSlice(
                                 kids[(i+1)..], alloc) else try Self.fromSlice("", alloc);
+                            defer b.releaseWithFn(Self.deinit);
 
-                            //a: Node = Inner.from_kids(kids[:i]) if i > 0 else Leaf.from_bytes(b'')
-                            //b: Node = Inner.from_kids(kids[i+1:]) if kids[i+1:] else Leaf.from_bytes(b'')
-                            var a_kid_a = try Self.concat(a, kid_split.fst, alloc);
+                            const a_kid_a = try Self.concat(a, kid_split.fst, alloc);
                             errdefer a_kid_a.releaseWithFn(Self.deinit);
 
                             const kid_b_b = try Self.concat(kid_split.snd, b, alloc);
@@ -376,7 +367,7 @@ pub fn NodeBF(branch_factor: comptime_int) type {
         /// Takes co-ownership of the kids on success.
         fn innerFromSlice(kids: []const Rc(Self), alloc: std.mem.Allocator) !Rc(Self) {
             std.debug.assert(kids.len <= BRANCH_FACTOR);
-             std.debug.assert(kids.len > 0);
+            std.debug.assert(kids.len > 0);
             var inner = try Self.Inner.fromSlice(kids);
             errdefer inner.release();
 
@@ -421,8 +412,7 @@ pub fn NodeBF(branch_factor: comptime_int) type {
                 // Don't return the value because it might have been released.
                 fn pop(self: *@This()) void {
                     std.debug.assert(self.arr.len > 0);
-                    var popped = self.arr.pop();
-                    popped.releaseWithFn(Self.deinit);
+                    self.arr.pop().releaseWithFn(Self.deinit);
                 }
 
                 fn top(self: *const @This()) Rc(Self) {
@@ -482,7 +472,6 @@ pub fn NodeBF(branch_factor: comptime_int) type {
                     return try Self.innerFromSlice(res_inner.arr.slice(), alloc);
                 }
             }
-
         }
 
         /// Concatenation implementation, left big with right small. Also
@@ -497,8 +486,6 @@ pub fn NodeBF(branch_factor: comptime_int) type {
         /// right side, then merge and create a new chain or
         /// parents. Sometimes the resulting tree height increases by 1.
         fn concatWithLower(left_p: Rc(Self), right_p: Rc(Self), alloc: std.mem.Allocator) !Rc(Self) {
-            //std.debug.print("BEFORE concat\n", .{});
-
             const h_right = left_p.value.*.height();
             const h_left = right_p.value.*.height();
             std.debug.assert(h_right >= h_left);
@@ -509,64 +496,109 @@ pub fn NodeBF(branch_factor: comptime_int) type {
             // Step (1): construct a chain of nodes from the root to the left merge
             // node inclusive. Refcounts are incremented for things we put
             // in the array and freed on pop/release.
-            var rootToLeft: RcArray(MAX_DEPTH) = .{};
-            defer rootToLeft.release();
 
-            // No new Rc are created in this block. We don't co-own `left`
-            // so it's never retained/released.
-            var left: Rc(Self) = left_p;
-
-            rootToLeft.push(left) catch unreachable;
-            for (0..h_right - h_left) |_| {
-                std.debug.assert(left.value.*.numKidsOrBytes() > 0);
-                const left_kids: Inner = left.value.*.assertExtractInner();
-                left = left_kids.top();
-                rootToLeft.push(left) catch
-                    panicAndExit("Can't append, depth too high!\n", .{rootToLeft});
-            }
-
-            // Check that we got the correct height:
-            std.debug.assert(left.value.*.height() == right_p.value.*.height());
-
-
+            var leftDownRight: RcArray(MAX_DEPTH) = getRootDown(left_p, h_right - h_left + 1, .right);
+            defer leftDownRight.release();
 
             // Step (2): pad the right node with a bunch of parents until
-            // it can be merged with the left node. Pop from rootToLeft so
-            // that left=rootToLeft[-1] has the same height as right.
+            // it can be merged with the left node. Pop from leftDownRight so
+            // that left=leftDownRight[-1] has the same height as right.
 
             // We take co-ownership of `right` for this function. When we
             // wrap `right` in parents, we will give away ownership to the parent.
-            var right: Rc(Self) = right_p;
-            _ = right.retain(); // now it's at N+1
-            defer right.releaseWithFn(Self.deinit); // now we can assume it's back at N.
+
+            const right = try prepareForMerge(right_p, &leftDownRight, alloc);
+            defer right.releaseWithFn(Self.deinit);
+
+            // NOTE: Allocated by this function and therfore owned by it,
+            // but also returned to the caller. Deallocate on errors:
+            const merged = try Self.merge(leftDownRight.top().value.*, right.value.*, alloc);
+            defer merged.releaseWithFn(Self.deinit);
+            debugCheck(leftDownRight.top().value, leftDownRight.top().value.*.height());
+            debugCheck(right.value, right.value.*.height());
+            debugCheck(merged.value, merged.value.*.height());
+
+            leftDownRight.pop();
+
+            return try bubbleUpKid(merged, &leftDownRight, .right, alloc);
+        }
 
 
-            std.debug.assert(rootToLeft.arr.len > 0);
-            while (rootToLeft.top().value.*.numKidsOrBytes() +
-                       right.value.*.numKidsOrBytes() > BRANCH_FACTOR) {
+        /// Helper function for `concatWith(Higher|Lower)`; produces a
+        /// co-owned RcArray. The result contains a chain or parents
+        /// (earlier nodes are parents of later) from root along the
+        /// RIGHT- or LEFT-MOST border of the tree. The chain contains `depth`
+        /// elements. Refcounts of all elements of the chain are
+        /// increased, because the returned data structure co-owns
+        /// them. Asserts that the tree is at most MAX_DEPTH (it will
+        /// be if it's mostly balanced), and that the chain
+        /// exists. This means that that all nodes in the chain are
+        /// parent nodes (i.e. Inner) and that all nodes have kids
+        /// (they will have in a tree constructed by and modified by
+        /// the public API).
+        fn getRootDown(root: Rc(Self), depth: usize, dir: enum {left, right}) RcArray(MAX_DEPTH) {
+            std.debug.assert(depth <= MAX_DEPTH);
+            //std.debug.assert(dir == .right);
 
-                // Move ownership of the previous `right` into a newly
-                // created parent, and assign to `right`. Invariant: we
-                // still need to release `rigth` after this, which happens
+            var pos = root;
+            var res = RcArray(MAX_DEPTH){};
+            errdefer res.release();
+
+            // We don't want to assert that the last node in the chain
+            // is Inner, hence first pushing outside the loop.
+            res.push(pos) catch unreachable;
+            for (0..depth-1) |_| {
+                const kids = pos.value.*.assertExtractInner();
+                const kid_pos = if (dir == .left) 0 else kids.arr.len-1;
+                std.debug.assert(kids.arr.len > 0);
+                pos = kids.arr.get(kid_pos);
+                res.push(pos) catch unreachable;
+            }
+            return res;
+        }
+
+        /// Wraps `root` in newly created parents while popping from
+        /// `chain` until the top of `chain` and the wrapped `root`
+        /// together have at most BRANCH_FACTOR kids. Releases all
+        /// newly created nodes on failure (but will still have popped
+        /// from `chain` as a side effect even if it
+        /// fails). Assumptions: `chain` is a chain of parent nodes
+        /// par -> kid -> kids' kid -> ..., the end of `chain` has the
+        /// same height as `root`.
+        fn prepareForMerge(root: Rc(Self), chain: *RcArray(MAX_DEPTH), alloc: std.mem.Allocator) !Rc(Self) {
+            var small = b: {var r = root; break :b r.retain();}; // Bumps small to N+1
+            // TODO: Can this be done simpler? This is needed for the
+            // `b` block below to handle refcounts correctly - this
+            // function holds an EXTRA ref to the whole chain of
+            // parents from `small` to `root`, and that extra refcount
+            // is transfered to the new parent when wrapping `small`.
+            errdefer small.releaseWithFn(Self.deinit); // now we can assume it's back at N.
+
+
+            std.debug.assert(chain.*.arr.len > 0);
+            while (chain.*.top().value.*.numKidsOrBytes() +
+                       small.value.*.numKidsOrBytes() > BRANCH_FACTOR) {
+
+                // Move ownership of the previous `small` into a newly
+                // created parent, and assign to `small`. Invariant: we
+                // still need to release `small` after this, which happens
                 // though the defer above.
-                right = b: {
-                    var old_right = right;
-                    const new_right = try innerFromSlice(&.{old_right}, alloc);
-
-                    // Now old_right is at N+2
-                    old_right.releaseWithFn(Self.deinit); // back at N+1
-                    break :b new_right;
+                small = b: {
+                    const new_small = try innerFromSlice(&.{small}, alloc);
+                    // Now small is at N+2
+                    small.releaseWithFn(Self.deinit); // back at N+1
+                    break :b new_small;
                 };
-                if (rootToLeft.arr.len == 1) {
-                    const newParent = try innerFromSlice(&.{rootToLeft.top()}, alloc);
-                    // Move ownership of `newParent` to `rootToLeft`.
-                    defer {var np = newParent; np.releaseWithFn(Self.deinit);}
-                    rootToLeft.pop(); // Safe to release old top, as it's
+                if (chain.*.arr.len == 1) {
+                    const newParent = try innerFromSlice(&.{chain.*.top()}, alloc); // RC=1
+                    // Move ownership of `newParent` to `chain`.
+                    chain.*.pop(); // Safe to release old top, as it's
                     // now co-owned by NewParent.
-                    rootToLeft.push(newParent) catch unreachable;
-                    // after this block, the sole owner is rootToLeft
+                    chain.*.push(newParent) catch unreachable; // RC=2
+                    newParent.releaseWithFn(Self.deinit); // RC back at 1; owned by `chain`
+                    // after this block, the sole owner is chain
                 } else {
-                    rootToLeft.pop(); // releases ref to .top(), which is
+                    chain.*.pop(); // releases ref to .top(), which is
                     // fine since it's owned by the
                     // parent anyway.
                 }
@@ -577,146 +609,97 @@ pub fn NodeBF(branch_factor: comptime_int) type {
                 // std.debug.print("after WHILE iteration that wraps `right` and pops path, LEFT IS\n", .{});
                 // recPrintRefcounts(rootToLeft.top(), 0);
             }
-
-            // At this point this function co-owns the pointers
-            // `rootToLeft` and `right`. `rootToLeft` has at least one
-            // element; `rootToLeft.top()` and `right` are merge-able.
-            // std.debug.assert(rootToLeft.arr.len > 0);
-            // std.debug.assert(rootToLeft.top().value.*.numKidsOrBytes() +
-            //                      right.value.*.numKidsOrBytes() <= BRANCH_FACTOR);
-
-            // std.debug.print("\n\nafter WHILE loop that wraps `right` and pops path, LEFT is\n", .{});
-            // // Self.recPrintRefcounts(rootToLeft.top(), 0);
-
-            // std.debug.print("\n\nafter WHILE loop that wraps `right` and pops path, RIGHT is\n", .{});
-            // // Self.recPrintRefcounts(right, 0);
-
-            // std.debug.print("\n\nMerging {} with {}\n", .{rootToLeft.top().value.*, right.value.*});
-
-            // NOTE: Allocated by this function and therfore owned by it,
-            // but also returned to the caller. Deallocate on errors:
-            var merged = try Self.merge(rootToLeft.top().value.*, right.value.*, alloc);
-            debugCheck(rootToLeft.top().value, rootToLeft.top().value.*.height());
-            debugCheck(right.value, right.value.*.height());
-            debugCheck(merged.value, merged.value.*.height());
-            // Merged has the same height as rootToLeft.top() -- that is
-            // LEFT and `right`.
-            // std.debug.print("\n\nMerged result is: \n\n", .{});
-            // recPrintRefcounts(merged, 0);
-            // errdefer {
-            //     for (rootToLeft.arr.slice()) |p| {
-            //         recPrintRefcounts(p, 0);
-            //     }
-            //     //recPrintRefcounts(merged, 0);
-            //     //merged.releaseWithFn(Self.deinit);
-            // }
+            return small;
+        }
 
 
-            // Step (3); go up the chain `rootToLeft` of parents, and
-            // re-create them with `merged` as the rightmost
-            // kid. Invariant: `rootToLeft` only contains .inner nodes.
+        /// `chain` is an array of inner nodes root -> kid -> kid's
+        /// kid -> ... Creates a new root node for a new tree where
+        /// the leftmost kid has been replaced by `leftmost`. That is,
+        /// take the last element of `chain` and replace it's leftmost
+        /// kid with `leftmost`, then modify the rest of the
+        /// chain. But nodes are immutable, so this creates a new
+        /// parallel chain. The nodes in `chain` are released by
+        /// .pop(). Allocated memory should be cleaned up on failure
+        /// (TODO are there tests for it?)
+        fn bubbleUpKid(kid: Rc(Self), chain: *RcArray(MAX_DEPTH), kid_pos: enum {left, right},
+                       alloc: std.mem.Allocator) !Rc(Self) {
+            // Usage:
+            //   var res = try bubbleUpLeftmostKid(leftmost, &chain, alloc);
 
-            // Convenient ordering: leftToRoot
-            // TODO!!! bug here, reversing only when looking at the array
-            // from the start, we look at it from the top.
-            // std.mem.reverse(Rc(Self), rootToLeft.arr.slice());
-            //const leftToRoot = rootToLeft.arr.slice();
+            // If we do `res.release()` we're back at where we
+            // started, except that `chain` is now empty. So
+            //    var res = try bubbleUpLeftmostKid(leftmost, &chain, alloc);
+            //    res.releaseWithFn(deinit)
+            // should be equilavent to
+            //    chain.release();
 
-            // std.debug.print("Contents of rootToLeft:\n", .{});
-            // for (rootToLeft.arr.slice(), 0..) |ptr, i| {
-            //     std.debug.print("\nTree #{}:\n", .{i});
-            //     recPrintRefcounts(ptr, 0);
-            // }
+            // When things go wrong, it should be a no-op provided
+            // there is a `defer chain.release()` at the caller.
 
-            rootToLeft.pop();
+            // This fn co-owns `res`.
+            var res = b: {var l = kid; break :b l.retain();}; // N+1
+            errdefer res.releaseWithFn(Self.deinit);
 
-            // std.debug.print("\nContents of rootToLeft AFTER POP:\n", .{});
-            // for (rootToLeft.arr.slice(), 0..) |ptr, i| {
-            //     std.debug.print("\nTree #{}:\n", .{i});
-            //     recPrintRefcounts(ptr, 0);
-            // }
+            while (chain.arr.len > 0) {
+                // The loop transfers ownership of `res` to a newly
+                // created parent. Also safe during errors.
 
-
-
-            while (rootToLeft.arr.len > 0) {
-                // Clone
-                var par_kids: RcArray(BRANCH_FACTOR)  = rootToLeft.top().value.*.assertExtractInner().clone();
-                defer par_kids.release();
-                rootToLeft.pop();
+                // co-owning `par_kids`.
+                var par_kids: RcArray(BRANCH_FACTOR)  = chain.top().value.*.assertExtractInner().clone();
+                defer par_kids.release(); //
+                chain.pop(); // Safe, since we cloned what we need (increasing refcount).
 
                 std.debug.assert(par_kids.arr.len > 0);
                 {
-                    const rightmost = par_kids.top();
-                    std.debug.assert(rightmost.value.*.height() == merged.value.*.height());
+                    // Give co-ownership of `res` to `par_kids`, and
+                    // kick out `leftmost_kid`.
+                    const kid_idx = if (kid_pos == .left) 0 else par_kids.arr.len-1;
+                    const edge_kid = par_kids.arr.get(kid_idx);
+                    std.debug.assert(edge_kid.value.*.height() == res.value.*.height());
+                    par_kids.arr.set(kid_idx, res.retain()); // now at N+2, will be back at N+1 after par_kids.release().
+                    edge_kid.releaseWithFn(Self.deinit);
                 }
-                par_kids.pop();
-                par_kids.push(merged) catch unreachable;
-                merged.releaseWithFn(Self.deinit);
-
-
-                // var par_p: Rc(Self)  = b: {
-                //     var par_pv = rootToLeft.top();
-                //     const res =  par_pv.retain();
-                //     rootToLeft.pop();
-                //     break :b res;
-                // };
-                // defer par_p.releaseWithFn(Self.deinit);
-                // //const par: Self = par_p.value.*;
-                // // const par: Self = b: {
-                // //     const par_p  = rootToLeft.top();
-                // //     const par: Self = par_p.value.*;
-                // //     rootToLeft.pop(); // save to deallocate par_p
-                // //     break :b par;
-                // // };
-
-                //var par_kids = par_p.value.*.assertExtractInner().clone();
-                //defer par_kids.release();
-                // std.debug.assert(par_kids.arr.len > 0);
-
-                // const rightmost = par_kids.top();
-                // std.debug.print("\nParent is: \n", .{});
-                // recPrintRefcounts(par_p, 0);
-                // std.debug.print("\nRightmost kid is: \n", .{});
-                // recPrintRefcounts(rightmost, 0);
-                // std.debug.print("\nIt's going to be replaced with `merged`: \n", .{});
-                // recPrintRefcounts(merged, 0);
-
 
                 // Don't release the kid; it's still owned by its tree.
-                //std.debug.assert(rightmost.value.*.height() == merged.value.*.height());
-                //par_kids.pop(); // pops `rightmost`
+                const new_res = try Self.innerFromSlice(par_kids.arr.slice(), alloc); // Now at N+3
+                res.releaseWithFn(Self.deinit); // Back at N+2. Emulates assignment operator.
+                res = new_res;
 
-                // `merged` has refcount 1. This MOVES the ownership to
-                // `par_kids` without changing the refcount. Note that
-                // `merged` is overwritten below.
-                //par_kids.push(merged) catch unreachable;
-                merged = try Self.innerFromSlice(par_kids.arr.slice(), alloc);
-
-                // var par_agg = AggregateStats.empty();
-                // for (par_kids.arr.slice()) |kid| {
-                //     par_agg = par_agg.combine(kid.value.*.agg);
-                // }
-                // const new_par = Self {.agg = par_agg, .node = .{.inner = par_kids}};
-                // merged = try Rc(Self).init(alloc, new_par);
-                debugCheck(merged.value, merged.value.*.height());
+                debugCheck(res.value, res.value.*.height());
+                // N+1 thanks to par_kids.release(). ONLY owned by new_res which is now res.
             }
-
-            // TODO! We are at line 178 of the python code. Think about
-            // what to do with the refcounts! Should rootToLeft contain
-            // rc? but self can't be rc!
-
-            //_ = rootToLeft;
-            //_ = self;
-            //_ = other;
-            //_ = alloc;
-            return merged;
+            return res;
         }
 
-        fn concatWithHigher(self_p: Rc(Self), other: Rc(Self), alloc: std.mem.Allocator) !Rc(Self) {
-            _ = self_p;
-            _ = other;
-            _ = alloc;
-            unreachable;
+
+        /// Almost identical to concatWithLower; couldn't figure out
+        /// a good way to share code between them.
+        fn concatWithHigher(left_p: Rc(Self), right_p: Rc(Self), alloc: std.mem.Allocator) !Rc(Self) {
+            //std.debug.print("BEFORE concat\n", .{});
+
+            const h_right = left_p.value.*.height();
+            const h_left = right_p.value.*.height();
+            std.debug.assert(h_right <= h_left);
+
+            var rightDownLeft: RcArray(MAX_DEPTH) = getRootDown(right_p, h_left - h_right + 1, .left);
+            defer rightDownLeft.release();
+            std.debug.assert(rightDownLeft.arr.len == h_left - h_right + 1);
+
+            std.debug.assert(rightDownLeft.top().value.*.height() == left_p.value.*.height());
+
+            const left = try prepareForMerge(left_p, &rightDownLeft, alloc);
+            defer left.releaseWithFn(Self.deinit);
+
+            const merged = try Self.merge(left.value.*, rightDownLeft.top().value.*, alloc);
+            defer merged.releaseWithFn(Self.deinit);
+            debugCheck(rightDownLeft.top().value, rightDownLeft.top().value.*.height());
+            debugCheck(left.value, left.value.*.height());
+            debugCheck(merged.value, merged.value.*.height());
+
+            rightDownLeft.pop();
+
+            return try bubbleUpKid(merged, &rightDownLeft, .left, alloc);
         }
 
         const PosError = error{
@@ -813,6 +796,7 @@ pub fn NodeBF(branch_factor: comptime_int) type {
         }
 
         fn debugCheck(node: *const Self, expected_height: usize) void {
+            if (!std.debug.runtime_safety) return;
             // Recurslively check that it's balanced:
             switch (node.*.node) {
                 .leaf => {
@@ -849,11 +833,14 @@ pub fn NodeBF(branch_factor: comptime_int) type {
                 std.debug.print("  ", .{});
             }
             const node_tag: NodeTag = node.value.*.node;
-            std.debug.print("rc={} ptr=0x{x} {s} {}\n", .{node.strongCount(), @intFromPtr(node.value), @tagName(node_tag), node.value.*.agg});
+            std.debug.print("rc={} ptr=0x{x} {s} {}", .{node.strongCount(), @intFromPtr(node.value), @tagName(node_tag), node.value.*.agg});
             if (node_tag == .inner) {
+                std.debug.print("\n", .{});
                 for (node.value.*.assertExtractInner().arr.slice()) |kid_p| {
                     recPrintRefcounts(kid_p, indent+1);
                 }
+            } else {
+                std.debug.print(" '{s}'\n", .{node.value.*.assertExtractLeaf().slice()});
             }
         }
 
@@ -893,11 +880,6 @@ fn innerNodeForTest(alloc: std.mem.Allocator) !Rc(Node) {
     defer leaf.releaseWithFn(Node.deinit);
     const parent = try Node.innerFromSlice(&.{leaf}, alloc);
     return parent;
-
-    // var inner = try Node.Inner.init(1);
-    // inner.set(0, leaf);
-    // const inner_node = Node{ .node = .{ .inner = inner }, .agg = Node.AggregateStats.empty() };
-    // return try Rc(Node).init(alloc, inner_node);
 }
 
 fn cleanUpNode(node: Rc(Node)) void {
@@ -918,12 +900,12 @@ test "leaf node height is 0" {
 }
 
 test "parent node height is 1" {
-    var leaf = try leafNodeForTest(std.testing.allocator);
+    const leaf = try leafNodeForTest(std.testing.allocator);
     defer leaf.releaseWithFn(Node.deinit);
     var inner = Node.Inner {};
     try inner.push(leaf);
 
-    var parent_node = Node{ .node = .{ .inner = inner }, .agg = AggregateStats.empty() };
+    const parent_node = Node{ .node = .{ .inner = inner }, .agg = AggregateStats.empty() };
     defer parent_node.deinit();
 
     try expect(parent_node.height() == 1);
@@ -937,17 +919,16 @@ test "can create inner node no leaks" {
 test "numKidsOrBytes leaf is num bytes" {
     const leaf_content = "ab";
     const leaf = try Node.Leaf.fromSlice(leaf_content);
-    //defer leaf.releaseWithFn(Node.deinit);
     const n = Node{ .node = .{ .leaf = leaf }, .agg = AggregateStats.empty() };
     try expect(n.numKidsOrBytes() == leaf_content.len);
 }
 
 test "numKidsOrBytes inner is num kids" {
-    var leaf =try leafNodeForTest(std.testing.allocator);
+    const leaf =try leafNodeForTest(std.testing.allocator);
     defer leaf.releaseWithFn(Node.deinit);
     var inner = Node.Inner {};
     try inner.push(leaf);
-    var inner_node = Node{ .node = .{ .inner = inner }, .agg = AggregateStats.empty() };
+    const inner_node = Node{ .node = .{ .inner = inner }, .agg = AggregateStats.empty() };
     defer inner_node.deinit();
 
     try expect(inner_node.numKidsOrBytes() == 1);
@@ -1037,9 +1018,7 @@ test "pos to index in matches PosIterator" {
 
     for (longer_text, 0..) |_, i| {
         const p = it.next() orelse unreachable;
-        //std.debug.print("i: {}, pos: {}, byte: {c}\n", .{i, p, b});
         const offset = node.posToOffset(p) catch unreachable;
-        //std.debug.print("offset: {}\n", .{offset});
         try expect(offset == i);
     }
     try expect(it.next() == null);
@@ -1094,15 +1073,6 @@ test "can call concat non-empty with empty" {
     }
     try expect(iter.next() == null);
 
-
-    // std.debug.print("Refcounts: long root:\n", .{});
-    // recPrintRefcounts(node_p, 0);
-
-    // std.debug.print("Refcounts: empty leaf:\n", .{});
-    // recPrintRefcounts(empty_node_p, 0);
-
-    // std.debug.print("Refcounts: combined :\n", .{});
-    // recPrintRefcounts(concat_node_p, 0);
 }
 
 test "can call concat empty with non-empty" {
@@ -1122,20 +1092,10 @@ test "can call concat empty with non-empty" {
         try expect(expected == actual orelse unreachable);
     }
     try expect(iter.next() == null);
-
-    // std.debug.print("Refcounts: long root:\n", .{});
-    // recPrintRefcounts(node_p, 0);
-
-    // std.debug.print("Refcounts: empty leaf:\n", .{});
-    // recPrintRefcounts(empty_node_p, 0);
-
-    // std.debug.print("Refcounts: combined :\n", .{});
-    // recPrintRefcounts(concat_node_p, 0);
 }
 
 
 test "can concat short non-empty with short non-empty" {
-
     const ab = try Node.fromSlice("ab", std.testing.allocator);
     defer cleanUpNode(ab);
 
@@ -1152,15 +1112,6 @@ test "can concat short non-empty with short non-empty" {
         try expect(expected == actual orelse unreachable);
     }
     try expect(iter.next() == null);
-
-    // std.debug.print("Refcounts: ab:\n", .{});
-    // recPrintRefcounts(ab, 0);
-
-    // std.debug.print("Refcounts: cd:\n", .{});
-    // recPrintRefcounts(cd, 0);
-
-    // std.debug.print("Refcounts: combined :\n", .{});
-    // recPrintRefcounts(abcd, 0);
 }
 
 test "can concat longer non-empty with short non-empty" {
@@ -1185,7 +1136,6 @@ test "can concat longer non-empty with short non-empty" {
 
 
 test "can concat long non-empty with short non-empty" {
-    //std.debug.print("\n\n\n", .{});
     const long_node = try Node.fromSlice(longer_text, std.testing.allocator);
     defer cleanUpNode(long_node);
 
@@ -1197,6 +1147,7 @@ test "can concat long non-empty with short non-empty" {
 
     var iter = long_node_cd.value.*.allBytesIterator();
     for (longer_text ++ "cd") |expected| {
+
         const actual = iter.next();
         try expect(actual != null);
         try expect(expected == actual orelse unreachable);
@@ -1205,12 +1156,8 @@ test "can concat long non-empty with short non-empty" {
 }
 
 test "can concat short with self" {
-    //std.debug.print("\n\n\n", .{});
     const ab = try Node.fromSlice("ab", std.testing.allocator);
     defer cleanUpNode(ab);
-
-    // const cd = try Node.fromSlice("cd", std.testing.allocator);
-    // defer cleanUpNode(cd);
 
     const ab_ab = try Node.concat(ab, ab, std.testing.allocator);
     defer cleanUpNode(ab_ab);
@@ -1225,12 +1172,8 @@ test "can concat short with self" {
 }
 
 test "can concat long with self" {
-    //std.debug.print("\n\n\n", .{});
     const longer = try Node.fromSlice(longer_text, std.testing.allocator);
     defer cleanUpNode(longer);
-
-    // const cd = try Node.fromSlice("cd", std.testing.allocator);
-    // defer cleanUpNode(cd);
 
     const longer_longer = try Node.concat(longer, longer, std.testing.allocator);
     defer cleanUpNode(longer_longer);
@@ -1245,15 +1188,11 @@ test "can concat long with self" {
 }
 
 test "can concat long with other long" {
-    //std.debug.print("\n\n\n", .{});
     const longer = try Node.fromSlice(longer_text, std.testing.allocator);
     defer cleanUpNode(longer);
 
     const longer2 = try Node.fromSlice(longer_text, std.testing.allocator);
     defer cleanUpNode(longer2);
-
-    // const cd = try Node.fromSlice("cd", std.testing.allocator);
-    // defer cleanUpNode(cd);
 
     const longer_longer = try Node.concat(longer, longer2, std.testing.allocator);
     defer cleanUpNode(longer_longer);
@@ -1271,7 +1210,6 @@ test "can concat long with other long" {
 
 
 test "can concat long with lots of stuff" {
-    //std.debug.print("\n\n\n", .{});
     const longer = try Node.fromSlice(longer_text, std.testing.allocator);
     defer cleanUpNode(longer);
 
@@ -1290,10 +1228,10 @@ test "can concat long with lots of stuff" {
         }
         try expect(iter.next() == null);
 
-        //recPrintRefcounts(longer_other, 0);
 
         Node.debugCheck(longer_other.value, longer_other.value.*.height());
     }
+
 }
 
 
@@ -1315,13 +1253,9 @@ test "no leaks when short concat with failing allocator" {
 }
 
 test "No leaks in concat with different branch factors" {
+
     inline for (2..10) |bf| {
         const CustomNode = NodeBF(bf);
-        // var failing_allocator = std.testing.FailingAllocator.init(
-        //     std.testing.allocator,
-        //     .{.fail_index = 2}
-        // );
-        //const alloc = failing_allocator.allocator();
         const longer = try CustomNode.fromSlice(longer_text, std.testing.allocator);
         defer longer.releaseWithFn(CustomNode.deinit);
 
@@ -1330,18 +1264,21 @@ test "No leaks in concat with different branch factors" {
 
         const longer_longer = CustomNode.concat(longer, longer2, std.testing.allocator) catch return;
         defer longer_longer.releaseWithFn(CustomNode.deinit);
-    }
+        }
+
 }
 
-test "concat looks correct with different branch factors" {
+test "concat is correct with different branch factors" {
     @setEvalBranchQuota(10000);
     inline for (2..10) |bf| {
         const CustomNode = NodeBF(bf);
         const longer = try CustomNode.fromSlice(longer_text, std.testing.allocator);
         defer longer.releaseWithFn(CustomNode.deinit);
 
-        inline for (0..longer_text.len) |l| {
-            const other = try CustomNode.fromSlice(longer_text[0..l], std.testing.allocator);
+        const longer_longer = longer_text ++ longer_text ++ longer_text ++ longer_text;
+
+        inline for (0..longer_longer.len) |l| {
+            const other = try CustomNode.fromSlice(longer_longer[0..l], std.testing.allocator);
             defer other.releaseWithFn(CustomNode.deinit);
 
 
@@ -1349,7 +1286,7 @@ test "concat looks correct with different branch factors" {
             defer longer_other.releaseWithFn(CustomNode.deinit);
 
             var iter = longer_other.value.*.allBytesIterator();
-            for (longer_text ++ longer_text[0..l]) |expected| {
+            for (longer_text ++ longer_longer[0..l]) |expected| {
                 const actual = iter.next();
                 try expect(actual != null);
                 try expect(expected == actual orelse unreachable);
@@ -1358,11 +1295,10 @@ test "concat looks correct with different branch factors" {
             CustomNode.debugCheck(longer_other.value, longer_other.value.*.height());
         }
     }
+
 }
 
 test "concat doesn't leak at allocator failure" {
-    //@setEvalBranchQuota(10000);
-
     const CustomNode = NodeBF(2);
     const longer = try CustomNode.fromSlice(longer_text, std.testing.allocator);
     defer longer.releaseWithFn(CustomNode.deinit);
@@ -1378,22 +1314,16 @@ test "concat doesn't leak at allocator failure" {
         const alloc = failing_allocator.allocator();
 
         const longer_other = CustomNode.concat(longer, shorter, alloc) catch b: {
-            std.debug.print("Expected refcount is 1, actual is: {}, l is: {}\n", .{longer.strongCount(), l});
-            //CustomNode.recPrintRefcounts(longer, 0);
             try expect(longer.strongCount() == 1);
             break :b try CustomNode.fromSlice("", std.testing.allocator);
         };
 
         defer longer_other.releaseWithFn(CustomNode.deinit);
-        // CustomNode.recPrintRefcounts(longer, 0);
-        // CustomNode.recPrintRefcounts(longer_other, 0);
-        //std.debug.print("\n\n\n", .{});
     }
 }
 
 
 test "Can split ab" {
-    //@setEvalBranchQuota(10000);
     const node = try Node.fromSlice("ab", std.testing.allocator);
     defer node.releaseWithFn(Node.deinit);
     const splt = try Node.splitAt(node, 1, std.testing.allocator);
@@ -1406,7 +1336,6 @@ test "Can split ab" {
 
 
 test "splits ab into a and b" {
-    //@setEvalBranchQuota(10000);
     const node = try Node.fromSlice("ab", std.testing.allocator);
     defer node.releaseWithFn(Node.deinit);
     const splt = try Node.splitAt(node, 1, std.testing.allocator);
@@ -1423,4 +1352,128 @@ test "splits ab into a and b" {
     try expect(b_iter.next() == null);
 }
 
+
+test "concat short with long" {
+    const ab = try Node.fromSlice("ab", std.testing.allocator);
+    defer ab.releaseWithFn(Node.deinit);
+
+    const longer = try Node.fromSlice(longer_text, std.testing.allocator);
+    defer longer.releaseWithFn(Node.deinit);
+
+        const ab_concat = try Node.concat(ab, longer, std.testing.allocator);
+        defer ab_concat.releaseWithFn(Node.deinit);
+
+
+    var iter = ab_concat.value.*.allBytesIterator();
+    for ("ab" ++ longer_text) |expected| {
+        const actual = iter.next();
+        try expect(actual != null);
+        try expect(expected == actual orelse unreachable);
+    }
+    try expect(iter.next() == null);
+}
+
+test "RootDownRight doesn't leak" {
+    const alloc = std.testing.allocator;
+    const lmost = try Node.fromSlice("ab", alloc);
+    defer lmost.releaseWithFn(Node.deinit);
+
+    try expect(lmost.value.*.node == .leaf);
+
+    const tree = try Node.fromSlice(longer_text, alloc);
+    defer tree.releaseWithFn(Node.deinit);
+
+    var chain = Node.getRootDown(tree, tree.value.*.height(), .left);
+    defer chain.release();
+}
+
+
+test "bubbleUpKid doesn't leak on long array" {
+    const CustomNode = NodeBF(2);
+    const lmost = try CustomNode.fromSlice("a", std.testing.allocator);
+    defer lmost.releaseWithFn(CustomNode.deinit);
+
+    try expect(lmost.value.*.node == .leaf);
+
+    const tree = try CustomNode.fromSlice(longer_text, std.testing.allocator);
+    defer tree.releaseWithFn(CustomNode.deinit);
+
+    var chain = CustomNode.getRootDown(tree, tree.value.*.height(), .left);
+    defer chain.release();
+
+    var failing_allocator = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{.fail_index = 2}
+    );
+    const alloc = failing_allocator.allocator();
+    const new_root = CustomNode.bubbleUpKid(lmost, &chain, .left, alloc) catch b: {
+        // idempotent and safe
+        chain.release();
+        try expect(tree.strongCount() == 1);
+        break :b try CustomNode.fromSlice("", std.testing.allocator);
+    };
+
+
+    defer new_root.releaseWithFn(CustomNode.deinit);
+}
+
+
+
+test "Can split longer text" {
+    const node = try Node.fromSlice(longer_text, std.testing.allocator);
+    defer node.releaseWithFn(Node.deinit);
+
+    const splt = try Node.splitAt(node, 50, std.testing.allocator);
+    defer splt.fst.releaseWithFn(Node.deinit);
+    defer splt.snd.releaseWithFn(Node.deinit);
+}
+
+test "Can split longer text in multiple places" {
+    const node = try Node.fromSlice(longer_text, std.testing.allocator);
+    defer node.releaseWithFn(Node.deinit);
+
+    for (0..(longer_text.len+1)) |l| {
+        const splt = try Node.splitAt(node, l, std.testing.allocator);
+        defer splt.fst.releaseWithFn(Node.deinit);
+        defer splt.snd.releaseWithFn(Node.deinit);
+
+        var a_iter = splt.fst.value.*.allBytesIterator();
+        var b_iter = splt.snd.value.*.allBytesIterator();
+
+        for (0..l) |i| {
+            try expect(a_iter.next() == longer_text[i]);
+        }
+        try expect(a_iter.next() == null);
+
+        for (l..(longer_text.len)) |i| {
+            try expect(b_iter.next() == longer_text[i]);
+        }
+        try expect(b_iter.next() == null);
+    }
+}
+
+
+test "Can split with failing allocator without leaking" {
+    inline for (2..16) |rc| {
+        const CustomNode = NodeBF(rc);
+        for (0..(longer_text.len+1)) |tl| {
+            for (0..20) |l| {
+                var failing_allocator = std.testing.FailingAllocator.init(
+                    std.testing.allocator,
+                    .{.fail_index = l}
+                );
+                const alloc = failing_allocator.allocator();
+
+                const node = CustomNode.fromSlice(longer_text, alloc) catch continue;
+                {
+                    defer node.releaseWithFn(CustomNode.deinit);
+                    const splt = CustomNode.splitAt(node, tl, alloc) catch continue;
+
+                    splt.fst.releaseWithFn(CustomNode.deinit);
+                    splt.snd.releaseWithFn(CustomNode.deinit);
+                }
+            }
+        }
+    }
+}
 
