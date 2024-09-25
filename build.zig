@@ -15,10 +15,29 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
+    const lib = b.addStaticLibrary(.{
+        .name = "editor",
+        // In this case the main source file is merely a path, however, in more
+        // complicated build scripts, this could be a generated file.
+        .root_source_file = b.path("src/rope.zig"),
+        .target = target,
+        .optimize = optimize,
+        //.emit_docs = .emit,
+    });
+
+    const docsget = b.addInstallDirectory(.{
+        .source_dir = lib.getEmittedDocs(),
+        .install_dir = .prefix,
+        .install_subdir = "docs",
+    });
+
+    b.default_step.dependOn(&docsget.step);
+
+
     // This declares intent for the library to be installed into the standard
     // location when the user invokes the "install" step (the default step when
     // running `zig build`).
-    // b.installArtifact(lib);
+    b.installArtifact(lib);
 
     const exe = b.addExecutable(.{
         .name = "editor",
@@ -26,6 +45,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
@@ -56,20 +76,37 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     // Creates a step for unit testing. This only builds the test executable
+    // but does not run it.
+    // const lib_unit_tests = b.addTest(.{
+    //     .root_source_file = b.path("src/rope.zig"),
+    //     .target = target,
+    //     .optimize = optimize,
+    // });
 
-    const exe_unit_tests = b.addTest(.{
-        .root_source_file = b.path("src/mini.zig"),
+    // const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
+
+    const rope_unit_tests = b.addTest(.{
+        .root_source_file = b.path("tests/rope_tests.zig"),
         .target = target,
         .optimize = optimize,
     });
 
-    const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
+    const rope_private_unit_tests = b.addTest(.{
+        .root_source_file = b.path("src/rope.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const run_exe_unit_tests = b.addRunArtifact(rope_unit_tests);
+    const run_private_unit_tests = b.addRunArtifact(rope_private_unit_tests);
 
     // Similar to creating the run step earlier, this exposes a `test` step to
     // the `zig build --help` menu, providing a way for the user to request
     // running the unit tests.
     const test_step = b.step("test", "Run unit tests");
+    // test_step.dependOn(&run_lib_unit_tests.step);
     test_step.dependOn(&run_exe_unit_tests.step);
+    test_step.dependOn(&run_private_unit_tests.step);
 
     const exe_check = b.addExecutable(.{
         .name = "foo",
@@ -80,6 +117,26 @@ pub fn build(b: *std.Build) void {
 
     // Any other code to define dependencies would
     // probably be here.
+    const zigrc_dep = b.dependency("zigrc", .{
+        .target = target,
+        .optimize = optimize
+    });
+    const zigrc_mod = &zigrc_dep.artifact("zig-rc").root_module;
+
+    const rope_mod = b.createModule(.{
+        .root_source_file = b.path("src/rope.zig"),
+        .imports = &.{
+            .{ .name = "zigrc", .module=zigrc_mod}
+        }
+    });
+    
+    exe.root_module.addImport("zigrc", zigrc_mod);
+    exe.root_module.addImport("rope", rope_mod);
+    rope_unit_tests.root_module.addImport("rope", rope_mod);
+    rope_unit_tests.root_module.addImport("zigrc", zigrc_mod);
+
+    rope_private_unit_tests.root_module.addImport("rope", rope_mod);
+    rope_private_unit_tests.root_module.addImport("zigrc", zigrc_mod);
 
     // These two lines you might want to copy
     // (make sure to rename 'exe_check')
