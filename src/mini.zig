@@ -33,6 +33,11 @@ var tty: fs.File = undefined;
 // https://ziglang.org/documentation/master/std/#std.posix.poll
 // https://chatgpt.com/share/43543411-1296-4086-990d-0df98b621321
 
+fn get_writer(buf: []u8) std.io.GenericWriter {
+    var fbs = std.io.fixedBufferStream(&buf);
+    return fbs.writer();
+}
+
 var parse_buf: [1000]u8 = .{128} ** 1000;
 var parse_fbs = std.io.fixedBufferStream(&parse_buf);
 const parse_writer = parse_fbs.writer();
@@ -87,27 +92,30 @@ pub fn main() !void {
         const num_read = try tty.read(&buffer);
         if (num_read == 0) continue;
 
-        parse_fbs.reset();
-        try parse_utils.parseWrite(buffer[0..num_read], parse_writer, &.{128});
-        var cmd_it = mem.splitSequence(u8, parse_fbs.getWritten(), &.{128});
+        print("\nall bytes {any}\n", .{buffer[0..num_read]});
+        var cmd_it = parse_utils.InputSeqIterator{ .bytes = buffer[0..num_read] };
 
-        while (cmd_it.next()) |cmd| {
-            if (genericMatch(cmd, &q_eq)) {
+        while (try cmd_it.next()) |cmd| {
+            print("\n single cmd {any}\n", .{cmd});
+            parse_fbs.reset();
+            try parse_utils.parseWrite(cmd, parse_writer);
+            const cmd2: []const u8 = parse_fbs.getWritten();
+
+            if (genericMatch(cmd2, &q_eq)) {
                 return;
-            } else if (genericMatch(cmd, &j_eq)) {
+            } else if (genericMatch(cmd2, &j_eq)) {
                 // next line
                 if (lines_read + 20 > size.height and first_line < lines_read - 20) {
                     first_line += 1;
                 }
-            } else if (genericMatch(cmd, &k_eq)) {
+            } else if (genericMatch(cmd2, &k_eq)) {
                 // previous line
                 if (first_line > 0) {
                     first_line -= 1;
                 }
             }
+            try render(cmd);
         }
-
-        try render(buffer[0..num_read]);
     }
 }
 
@@ -120,7 +128,7 @@ fn render(maybe_bytes: ?[]const u8) !void {
     try clear(writer);
 
     try render_file_content(writer);
-    // try render_bottom_ui(maybe_bytes, writer);
+    try render_bottom_ui(maybe_bytes, writer);
     _ = &maybe_bytes;
 
     try buf_writer.flush();
@@ -136,13 +144,14 @@ fn render_file_content(writer: anytype) !void {
 
 /// render bottom ui
 fn render_bottom_ui(maybe_bytes: ?[]const u8, arg_writer: anytype) !void {
+    // var rawbuf
     var multi_writer = write_utils.multiWriter(arg_writer);
     const writer = multi_writer.writer();
     if (maybe_bytes) |bytes| {
         try moveCursor(writer, size.height - 2, 0);
         try parse_utils.rawWrite(bytes, writer);
         try moveCursor(writer, size.height - 1, 0);
-        try parse_utils.parseWrite(bytes, writer, &.{});
+        try parse_utils.parseWrite(bytes, writer);
     }
 }
 

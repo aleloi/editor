@@ -1,6 +1,7 @@
 //! parse_utils, parsing terminal input sequences
 const std = @import("std");
 const print = std.debug.print;
+const panic = std.debug.panic;
 
 // the functions that match keycodes to keys
 const match_keycodes = @import("match_keycodes.zig");
@@ -108,6 +109,53 @@ fn processVtSequence(bytes: []const u8, writer: anytype) !void {
     } else return ParseError.ParseBase;
 }
 
+/// splits the slice into its constituent input sequences
+pub const InputSeqIterator = struct {
+    bytes: []const u8,
+    pub fn next(self: *@This()) !?[]const u8 {
+        // if no bytes, finished iterating
+        if (self.bytes.len == 0) return null;
+        var ret: []const u8 = undefined;
+        // if 1 bytes, return after updating bytes
+        if (self.bytes.len == 1) {
+            ret = self.bytes;
+            self.bytes = self.bytes[1..];
+            // print("\nyield 1 byte {any}\n", .{ret});
+            return ret;
+        }
+        if (self.bytes[0] != '\x1B') panic("expected bytes {any} to start with 33\n", .{self.bytes});
+        if (self.bytes.len == 2) {
+            ret = self.bytes;
+            self.bytes = self.bytes[2..];
+            // print("\nyield 2 bytes {any}\n", .{ret});
+            return ret;
+        }
+        // if 3+ bytes, should start with CSI, or is SS3 seq
+        if (self.bytes[1] == 'O') {
+            // SS3, length 3 bytes
+            ret = self.bytes[0..3];
+            self.bytes = self.bytes[3..];
+            // print("\nyield 3 bytes {any}\n", .{ret});
+            return ret;
+        }
+        if (self.bytes[1] == '[') {
+            // CSI, variable length
+            var index: usize = 2;
+            while (index < self.bytes.len) {
+                if (64 <= self.bytes[index] and self.bytes[index] <= 126) {
+                    ret = self.bytes[0..(index + 1)];
+                    self.bytes = self.bytes[(index + 1)..];
+                    // print("\nyield {} bytes {any}\n", .{ index + 1, ret });
+                    return ret;
+                }
+                index += 1;
+            }
+            panic("CSI sequence {any} not terminated\n", .{self.bytes});
+        }
+        panic("3+ bytes {any} but not CSI or SS3\n", .{self.bytes});
+    }
+};
+
 /// try to parse terminal input sequence
 /// https://en.wikipedia.org/wiki/ANSI_escape_code#Terminal_input_sequences
 fn parseInputBytes(bytes: []const u8, writer: anytype) !void {
@@ -145,49 +193,44 @@ fn parseInputBytes(bytes: []const u8, writer: anytype) !void {
             // try writer.writeAll("\"");
         },
         else => {
-            // if CSI occurs multiple times, treat sequences separately
-            var split_it = CsiIterator{ .data = bytes };
-            while (split_it.next()) |part| {
-                if (std.mem.eql(u8, part[0..2], &.{ '\x1B', 'O' })) {
-                    // SS3 (Single Shift 3) sequences '\x1B O <keycode>'
-                    return match_keycodes.match_Ss3(part[2..], writer);
-                }
-                if (part.len >= 6 and std.mem.eql(u8, part[0..4], &.{ '\x1B', '[', '1', ';' })) {
-                    // CSI 1 ; <modifier> <keycode>
-                    // xterm sequence with modifier
-                    try interpretModifier(part[4], writer);
-                    return match_keycodes.matchXterm(part[5..], writer);
-                }
-                // std.mem.eql(u8, part[0..3], .{'\x1B', '1'}))
-                // we should not have recieved so many bytes
-                // if they are not an escape code
-                // so the first bytes should be [esc] '['
-                if (!std.mem.eql(u8, part[0..2], &CSI)) return ParseError.ParseBase;
-                if (part[0] != '\x1B' or part[1] != '[') {
-                    return ParseError.ParseBase;
-                }
-                if (part[part.len - 1] == '~') {
-                    // vt sequence
-                    // [esc] '[' ([keycode]) (';'[modifier]) '~'
-                    try processVtSequence(part[2..(part.len - 1)], writer);
+            if (std.mem.eql(u8, bytes[0..2], &.{ '\x1B', 'O' })) {
+                // SS3 (Single Shift 3) sequences '\x1B O <keycode>'
+                return match_keycodes.match_Ss3(bytes[2..], writer);
+            }
+            if (bytes.len >= 6 and std.mem.eql(u8, bytes[0..4], &.{ '\x1B', '[', '1', ';' })) {
+                // CSI 1 ; <modifier> <keycode>
+                // xterm sequence with modifier
+                try interpretModifier(bytes[4], writer);
+                return match_keycodes.matchXterm(bytes[5..], writer);
+            }
+            // we should not have recieved so many bytes
+            // if they are not an escape code
+            // so the first bytes should be [esc] '['
+            if (!std.mem.eql(u8, bytes[0..2], &CSI)) return ParseError.ParseBase;
+            if (bytes[0] != '\x1B' or bytes[1] != '[') {
+                return ParseError.ParseBase;
+            }
+            if (bytes[bytes.len - 1] == '~') {
+                // vt sequence
+                // [esc] '[' ([keycode]) (';'[modifier]) '~'
+                try processVtSequence(bytes[2..(bytes.len - 1)], writer);
+            } else {
+                if (bytes[2] == '[') {
+                    // older vt sequence
+                    try match_keycodes.matchOldSchemeVt(bytes[2..], writer);
                 } else {
-                    if (part[2] == '[') {
-                        // older vt sequence
-                        try match_keycodes.matchOldSchemeVt(part[2..], writer);
-                    } else {
-                        // xterm sequence
-                        // [esc] '[' ([modifier]) [char]
-                        // the terminal seems to ignore modifiers,
-                        //  and so we ignore them
-                        try match_keycodes.matchXterm(part[2..], writer);
-                    }
+                    // xterm sequence
+                    // [esc] '[' ([modifier]) [char]
+                    // the terminal seems to ignore modifiers,
+                    //  and so we ignore them
+                    try match_keycodes.matchXterm(bytes[2..], writer);
                 }
             }
         },
     }
 }
 
-pub fn parseWrite(raw: []const u8, writer: anytype, delim: []const u8) !void {
+pub fn parseWrite(raw: []const u8, writer: anytype) !void {
     // std.debug.print("Input sequence parse attempt: ", .{});
     if (raw.len > 0) {
         parseInputBytes(raw, writer) catch {
@@ -196,7 +239,6 @@ pub fn parseWrite(raw: []const u8, writer: anytype, delim: []const u8) !void {
     } else {
         try writer.print("Readable bytes: {s}", .{myFmtBytes(raw)});
     }
-    try writer.print("{s}", .{delim});
     // std.debug.print("\n", .{});
 }
 
