@@ -97,6 +97,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const rb_tests = b.addTest(.{
+        .root_source_file = b.path("src/render_buffer.zig"),
+        .target=target,
+        .optimize=optimize,
+    });
+
+    const run_rb_tests = b.addRunArtifact(rb_tests);
     const run_exe_unit_tests = b.addRunArtifact(rope_unit_tests);
     const run_private_unit_tests = b.addRunArtifact(rope_private_unit_tests);
 
@@ -107,6 +114,7 @@ pub fn build(b: *std.Build) void {
     // test_step.dependOn(&run_lib_unit_tests.step);
     test_step.dependOn(&run_exe_unit_tests.step);
     test_step.dependOn(&run_private_unit_tests.step);
+    test_step.dependOn(&run_rb_tests.step);
 
     const exe_check = b.addExecutable(.{
         .name = "foo",
@@ -121,7 +129,18 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize
     });
+
     const zigrc_mod = &zigrc_dep.artifact("zig-rc").root_module;
+    const leaking_rc_mod = b.createModule(.{
+        .root_source_file = b.path("src/leaking_rc.zig"),
+        // .imports = &.{
+        //     .{ .name = "zigrc", .module=zigrc_mod}
+        // }
+    });
+
+    //zigrc_mod = leaking_rc_mod;
+    _ = leaking_rc_mod;
+
 
     const rope_mod = b.createModule(.{
         .root_source_file = b.path("src/rope.zig"),
@@ -129,7 +148,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "zigrc", .module=zigrc_mod}
         }
     });
-    
+
     exe.root_module.addImport("zigrc", zigrc_mod);
     exe.root_module.addImport("rope", rope_mod);
     rope_unit_tests.root_module.addImport("rope", rope_mod);
@@ -137,6 +156,7 @@ pub fn build(b: *std.Build) void {
 
     rope_private_unit_tests.root_module.addImport("rope", rope_mod);
     rope_private_unit_tests.root_module.addImport("zigrc", zigrc_mod);
+    rb_tests.root_module.addImport("rope", rope_mod);
 
     // These two lines you might want to copy
     // (make sure to rename 'exe_check')
