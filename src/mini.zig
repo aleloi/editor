@@ -1,6 +1,6 @@
 //! mini, main editor entrypoint
 const std = @import("std");
-const rope = @import("rope");
+//const rope = @import("rope");
 const fs = std.fs;
 const io = std.io;
 const mem = std.mem;
@@ -12,6 +12,8 @@ const format = @import("format.zig");
 const term_utils = @import("term_utils.zig");
 const parse_utils = @import("parse_utils.zig");
 const write_utils = @import("write_utils.zig");
+
+const doc = @import("document.zig");
 
 var file_content: [5 * 1024 * 1024]u8 = undefined;
 var bytes_read: usize = 0;
@@ -36,7 +38,87 @@ var tty: fs.File = undefined;
 // https://chatgpt.com/share/43543411-1296-4086-990d-0df98b621321
 
 pub fn main() !void {
+    tty = try fs.cwd().openFile("/dev/tty", .{ .mode = .read_write });
+    defer tty.close();
+
+    try term_utils.uncook(tty);
+    defer term_utils.cook(tty) catch {};
+
+    try getInp();
+
+    size = try getSize();
+
+    var fds: [1]posix.pollfd = .{.{
+        .fd = tty.handle,
+        .events = posix.POLL.IN,
+        .revents = undefined,
+    }};
+
+    try render(null);
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const alloc = gpa.allocator();
+
+    const rope = try doc.openAsRope(alloc, "src/mini.zig");
+    defer rope.releaseWithFn(@TypeOf(rope.value.*).deinit);
+    var vp = doc.ViewPort {.height = size.height-1, .width=size.width-1};
+    var dc = try doc.Document.init(alloc, vp.height, vp.width, rope);
+
+
+    while (true) {
+        // var buffer: [1]u8 = undefined;
+        // _ = try tty.read(&buffer);
+
+        _ = try posix.poll(&fds, -1);
+        var buffer: [10]u8 = .{255} ** 10;
+        const num_read = try tty.read(&buffer);
+        if (num_read == 0) continue;
+
+        if (num_read == 0) unreachable;
+        // if (num_read > 1) {
+        //     // TODO return error so that deferred uncooking may work
+        //     //unreachable;
+        //     return;
+        // }
+        // try parse_utils.parse(buffer[0..num_read]);
+
+        if (buffer[0] == 'q') {
+            return;
+        } else if (buffer[0] == 'j') {
+            // next line
+            // if (lines_read + 20 > size.height and first_line < lines_read - 20) {
+            //     first_line += 1;
+            // }
+            vp.start.row += 1;
+            try dc.render_buffer.resize(vp);
+        } else if (buffer[0] == 'k') {
+            // previous line
+            if (vp.start.row > 0) {
+                vp.start.row -= 1;
+                //first_line -= 1;
+                try dc.render_buffer.resize(vp);
+            }
+        }
+        const txt = try dc.getText();
+        try renderLines(txt, buffer[0..num_read]);
+        //try render(buffer[0..num_read]);
     }
+}
+
+fn renderLines(lns: []const doc.LineSlice, bottom_bytes: []const u8) !void {
+    const tty_writer = tty.writer();
+    var buf_writer = std.io.bufferedWriter(tty_writer);
+    const writer = buf_writer.writer();
+
+    try clear(writer);
+
+    for (lns, 0..) |line, i| {
+        try writeLine(writer, line.line, i);
+    }
+
+    try render_bottom_ui(bottom_bytes, writer);
+    try buf_writer.flush();
+}
 
 /// render the current view
 fn render(maybe_bytes: ?[]const u8) !void {

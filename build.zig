@@ -103,7 +103,14 @@ pub fn build(b: *std.Build) void {
         .optimize=optimize,
     });
 
+    const doc_tests = b.addTest(.{
+        .root_source_file = b.path("src/document.zig"),
+        .target=target,
+        .optimize=optimize,
+    });
+
     const run_rb_tests = b.addRunArtifact(rb_tests);
+    const run_doc_tests = b.addRunArtifact(doc_tests);
     const run_exe_unit_tests = b.addRunArtifact(rope_unit_tests);
     const run_private_unit_tests = b.addRunArtifact(rope_private_unit_tests);
 
@@ -115,6 +122,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_exe_unit_tests.step);
     test_step.dependOn(&run_private_unit_tests.step);
     test_step.dependOn(&run_rb_tests.step);
+    test_step.dependOn(&run_doc_tests.step);
 
     const exe_check = b.addExecutable(.{
         .name = "foo",
@@ -157,6 +165,7 @@ pub fn build(b: *std.Build) void {
     rope_private_unit_tests.root_module.addImport("rope", rope_mod);
     rope_private_unit_tests.root_module.addImport("zigrc", zigrc_mod);
     rb_tests.root_module.addImport("rope", rope_mod);
+    doc_tests.root_module.addImport("rope", rope_mod);
 
     // These two lines you might want to copy
     // (make sure to rename 'exe_check')
