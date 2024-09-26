@@ -11,6 +11,7 @@ pub const MatchError = error{
     XtermMatchError,
     VtMatchError,
     VtOldMatchError,
+    Ss3MatchError,
 };
 
 /// tries to match the string in bytes to a string in codes.
@@ -100,14 +101,18 @@ pub fn match_ascii(byte: u8, writer: anytype) !void {
         "CTRL+-",
         "ASCII-DEL / BACKSPACE / CTRL++",
     };
-    _ = genericMatchCode(&[1]u8{byte}, &codes, &keys, writer) catch {
+    genericMatchCode(&[1]u8{byte}, &codes, &keys, writer) catch {
         return MatchError.ASCIIMatchError;
     };
 }
 
 /// match xterm keycode
 pub fn matchXterm(bytes: []const u8, writer: anytype) !void {
-    const codes: [10][]const u8 = .{
+    const codes: [14][]const u8 = .{
+        "P",
+        "Q",
+        "R",
+        "S",
         "1P",
         "1Q",
         "1R",
@@ -119,7 +124,11 @@ pub fn matchXterm(bytes: []const u8, writer: anytype) !void {
         "F",
         "H",
     };
-    const keys: [10][]const u8 = .{
+    const keys: [14][]const u8 = .{
+        "F1",
+        "F2",
+        "F3",
+        "F4",
         "F1",
         "F2",
         "F3",
@@ -131,7 +140,7 @@ pub fn matchXterm(bytes: []const u8, writer: anytype) !void {
         "END",
         "HOME",
     };
-    _ = genericMatchCode(bytes, &codes, &keys, writer) catch {
+    genericMatchCode(bytes, &codes, &keys, writer) catch {
         return MatchError.XtermMatchError;
     };
 }
@@ -184,7 +193,7 @@ pub fn matchVt(bytes: []const u8, writer: anytype) !void {
         "F11",
         "F12",
     };
-    _ = genericMatchCode(bytes, &codes, &keys, writer) catch {
+    genericMatchCode(bytes, &codes, &keys, writer) catch {
         return MatchError.VtMatchError;
     };
 }
@@ -205,8 +214,34 @@ pub fn matchOldSchemeVt(bytes: []const u8, writer: anytype) !void {
         "F4",
         "F5",
     };
-    _ = genericMatchCode(bytes, &codes, &keys, writer) catch {
+    genericMatchCode(bytes, &codes, &keys, writer) catch {
         return MatchError.VtOldMatchError;
+    };
+}
+
+pub fn match_Ss3(bytes: []const u8, writer: anytype) !void {
+    const codes: [8][]const u8 = .{
+        "P",
+        "Q",
+        "R",
+        "S",
+        "A",
+        "B",
+        "C",
+        "D",
+    };
+    const keys: [8][]const u8 = .{
+        "F1",
+        "F2",
+        "F3",
+        "F4",
+        "UP",
+        "DOWN",
+        "RIGHT",
+        "LEFT",
+    };
+    genericMatchCode(bytes, &codes, &keys, writer) catch {
+        return MatchError.Ss3MatchError;
     };
 }
 

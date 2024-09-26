@@ -5,6 +5,7 @@ const mem = std.mem;
 const os = std.os;
 const linux = std.os.linux;
 const posix = std.posix;
+const print = std.debug.print;
 
 const format = @import("format.zig");
 const term_utils = @import("term_utils.zig");
@@ -32,6 +33,31 @@ var tty: fs.File = undefined;
 // https://ziglang.org/documentation/master/std/#std.posix.poll
 // https://chatgpt.com/share/43543411-1296-4086-990d-0df98b621321
 
+var parse_buf: [1000]u8 = .{128} ** 1000;
+var parse_fbs = std.io.fixedBufferStream(&parse_buf);
+const parse_writer = parse_fbs.writer();
+// try writer.print("bla", .{});
+// print("{any}\n", .{fbs.getWritten()[3..]});
+// fbs.reset();
+// print("{s}\n", .{@typeName(@TypeOf(fbs.getWritten()))});
+
+/// tries to match the slice needle to a slice in haystack.
+fn genericMatch(needle: []const u8, haystack: []const []const u8) bool {
+    for (haystack) |straw| {
+        if (std.mem.eql(u8, needle, straw)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// quit commands
+const q_eq: [3][]const u8 = .{ "ESC", "Q", "q" };
+/// down commands
+const j_eq: [3][]const u8 = .{ "DOWN", "J", "j" };
+/// up commands
+const k_eq: [3][]const u8 = .{ "UP", "K", "k" };
+
 pub fn main() !void {
     tty = try fs.cwd().openFile("/dev/tty", .{ .mode = .read_write });
     defer tty.close();
@@ -56,25 +82,31 @@ pub fn main() !void {
         // _ = try tty.read(&buffer);
 
         _ = try posix.poll(&fds, -1);
-        var buffer: [10]u8 = .{255} ** 10;
+        var buffer: [1000]u8 = .{255} ** 1000;
+
         const num_read = try tty.read(&buffer);
         if (num_read == 0) continue;
 
-        if (num_read == 0) unreachable;
+        parse_fbs.reset();
+        try parse_utils.parseWrite(buffer[0..num_read], parse_writer, &.{128});
+        var cmd_it = mem.splitSequence(u8, parse_fbs.getWritten(), &.{128});
 
-        if (buffer[0] == 'q') {
-            return;
-        } else if (buffer[0] == 'j') {
-            // next line
-            if (lines_read + 20 > size.height and first_line < lines_read - 20) {
-                first_line += 1;
-            }
-        } else if (buffer[0] == 'k') {
-            // previous line
-            if (first_line > 0) {
-                first_line -= 1;
+        while (cmd_it.next()) |cmd| {
+            if (genericMatch(cmd, &q_eq)) {
+                return;
+            } else if (genericMatch(cmd, &j_eq)) {
+                // next line
+                if (lines_read + 20 > size.height and first_line < lines_read - 20) {
+                    first_line += 1;
+                }
+            } else if (genericMatch(cmd, &k_eq)) {
+                // previous line
+                if (first_line > 0) {
+                    first_line -= 1;
+                }
             }
         }
+
         try render(buffer[0..num_read]);
     }
 }
@@ -88,7 +120,8 @@ fn render(maybe_bytes: ?[]const u8) !void {
     try clear(writer);
 
     try render_file_content(writer);
-    try render_bottom_ui(maybe_bytes, writer);
+    // try render_bottom_ui(maybe_bytes, writer);
+    _ = &maybe_bytes;
 
     try buf_writer.flush();
 }
@@ -109,7 +142,7 @@ fn render_bottom_ui(maybe_bytes: ?[]const u8, arg_writer: anytype) !void {
         try moveCursor(writer, size.height - 2, 0);
         try parse_utils.rawWrite(bytes, writer);
         try moveCursor(writer, size.height - 1, 0);
-        try parse_utils.parseWrite(bytes, writer);
+        try parse_utils.parseWrite(bytes, writer, &.{});
     }
 }
 

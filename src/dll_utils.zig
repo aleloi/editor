@@ -14,21 +14,26 @@ const DllError = error{
     Other,
     /// failed to join properly on deletion
     DeleteError,
+    /// given invalid {row, col}
+    InvalidIndex,
+    /// tried to unpack null
+    UnpackError,
 };
 
-/// pair row, col
+/// pair {row, col}.
+/// row 1-indexed, col 0-indexed.
 const Point = struct {
-    row: ?usize,
-    col: ?usize,
+    usize,
+    usize,
 };
 
-fn point(row: ?usize, col: ?usize) Point {
-    return .{ .row = row, .col = col };
+fn point(row: usize, col: usize) Point {
+    return .{ row, col };
 }
 
 fn unpack(comptime T: type, maybe: ?T) !T {
     if (maybe) |val| return val;
-    return DllError.Other;
+    return DllError.UnpackError;
 }
 
 const MAX_ROW_LEN: usize = 10;
@@ -38,6 +43,17 @@ const row_arr_d: row_arr = .{0} ** MAX_ROW_LEN;
 /// begin node, end node, or regular node
 const NodeType = enum { fst, mid, lst };
 
+/// element in a linked list of rows
+///
+/// member properties
+///
+/// node_type: NodeType = NodeType.mid,
+///
+/// prev: ?*Node = null,
+///
+/// next: ?*Node = null,
+///
+/// data: row_arr = row_arr_d,
 const Node = struct {
     node_type: NodeType = NodeType.mid,
     prev: ?*Node = null,
@@ -72,11 +88,23 @@ const Node = struct {
             return DllError.EolError;
         }
     }
-    fn nextF(self: *Node) ?*Node {
-        return self.next;
+    fn getNode(self: *Node, index: usize) !*Node {
+        var curr: *Node = self;
+        var idx = index;
+        while (idx > 0) {
+            curr = curr.next orelse return DllError.InvalidIndex;
+            idx -= 1;
+        }
+        return curr;
     }
-    fn prevF(self: *Node) ?*Node {
-        return self.prev;
+    fn getNodeRev(self: *Node, index: usize) !*Node {
+        var curr: *Node = self;
+        var idx = index;
+        while (idx > 0) {
+            curr = curr.prev orelse return DllError.InvalidIndex;
+            idx -= 1;
+        }
+        return curr;
     }
 };
 
@@ -90,97 +118,113 @@ fn getNumLinesAfter(node: *Node) !usize {
     return ret;
 }
 
+/// connects the list ending on fst and the list starting on sec.
+///
+/// sets fst.next = sec, and sec.prev = fst
+fn link(fst: ?*Node, sec: ?*Node) !void {
+    (try unpack(*Node, fst)).next = sec;
+    (try unpack(*Node, sec)).prev = fst;
+}
+
+fn isValidIndex(root: *Node, index: Point) bool {
+    const node = root.getNode(index[0]) catch return false;
+    return index[1] < node.getLen() catch return false;
+}
+
+/// unpacks elems of a pair
+fn unpackPair(comptime T: type, pair: struct { ?T, ?T }) !struct { T, T } {
+    const fst, const lst = pair;
+    return .{ try unpack(T, fst), try unpack(T, lst) };
+}
+
+/// replace the segment old (inclusive) with the segment new (inclusive).
+///
+/// all four should be mid-type nodes.
+/// link(old_fst.prev, new_fst); link (new_lst, old_lst.next)
+fn replaceSegment(old: struct { ?*Node, ?*Node }, new: struct { ?*Node, ?*Node }) !void {
+    const old_from, const old_to = try unpackPair(*Node, old);
+    const new_from, const new_to = try unpackPair(*Node, new);
+    try link(old_from.prev, new_from);
+    try link(new_to, old_to.next);
+}
+
 /// given row, col (row is relative to root)
 ///
 /// with[0] placed at (row, col)
-fn insert_new(allocator: Allocator, root: *Node, at: Point, with: []const u8) !void {
-    var row = at.row.?;
-    var col = at.col.?;
+fn insert(allocator: Allocator, root: *Node, at: Point, with: []const u8) !void {
+    const row, const col = at;
+
     var orig_row: row_arr = row_arr_d;
-    var node = try getNode(root, row);
+    var node = try root.getNode(row);
+    const node_len = try node.getData(&orig_row);
+
+    if (col >= node_len) return DllError.InvalidIndex;
+
     var list = std.ArrayList(u8).init(allocator);
     defer list.deinit();
-    var node_len = try node.getData(&orig_row);
 
-    while (col >= node_len) {
-        row += 1;
-        col %= node_len;
-        node = try getNode(node, 1);
-        @memset(orig_row[0..node_len], 0);
-        node_len = try node.getData(&orig_row);
-    }
+    // while (col >= node_len) {
+    //     row += 1;
+    //     col %= node_len;
+    //     node = try node.getNode(1);
+    //     @memset(orig_row[0..node_len], 0);
+    //     node_len = try node.getData(&orig_row);
+    // }
 
+    // row before cursor
     try list.appendSlice(orig_row[0..col]);
+    // inserted text
     try list.appendSlice(with);
+    // row from cursor
     try list.appendSlice(orig_row[col..node_len]);
     const new_fst, const new_lst = try fromStr(allocator, list.items);
-    try link(node.prev, new_fst.next);
-    try link(new_lst.prev, node.next);
+    // try link(node.prev, new_fst.next);
+    // try link(new_lst.prev, node.next);
+    try replaceSegment(.{ node, node }, .{ new_fst.next, new_lst.prev });
 }
 
 /// the element at to becomes the element at from
 ///
 /// expect previous elem[to] == new elem[from]
-fn delete_new(allocator: Allocator, root: *Node, from: Point, to: Point) !void {
-    var fr_row = from.row.?;
-    var fr_col = from.col.?;
-    var to_row = to.row.?;
-    var to_col = to.col.?;
+fn delete(allocator: Allocator, root: *Node, from: Point, to: Point) !void {
+    const fr_row, const fr_col = from;
+    const to_row, const to_col = to;
 
     var list = std.ArrayList(u8).init(allocator);
     defer list.deinit();
 
+    // for debug, to compare old elem[to] and new elem[from]
     var compare_buf = [2]u8{ 0, 0 };
 
+    // navigate to from-Point
     var orig_fr_row: row_arr = row_arr_d;
-    var fr_node = try getNode(root, fr_row);
-    var fr_node_len = try fr_node.getData(&orig_fr_row);
-    while (fr_col >= fr_node_len) {
-        fr_row += 1;
-        fr_col %= fr_node_len;
-        fr_node = try getNode(fr_node, 1);
-        @memset(orig_fr_row[0..fr_node_len], 0);
-        fr_node_len = try fr_node.getData(&orig_fr_row);
-    }
+    const fr_node = try root.getNode(fr_row);
+    const fr_node_len = try fr_node.getData(&orig_fr_row);
+    if (fr_col >= fr_node_len) return DllError.InvalidIndex;
 
+    // navigate to to-Point
     var orig_to_row: row_arr = row_arr_d;
-    var to_node = try getNode(root, to_row);
-    var to_node_len = try to_node.getData(&orig_to_row);
-    while (to_col >= to_node_len) {
-        to_row += 1;
-        to_col %= to_node_len;
-        to_node = try getNode(to_node, 1);
-        @memset(orig_to_row[0..to_node_len], 0);
-        to_node_len = try to_node.getData(&orig_to_row);
-    }
+    const to_node = try fr_node.getNode(to_row - fr_row);
+    const to_node_len = try to_node.getData(&orig_to_row);
+    if (to_col >= to_node_len) return DllError.InvalidIndex;
 
-    // var orig_to_char: usize = undefined;
     try to_node.getPart(compare_buf[0..], to_col, to_col + 1);
+
     try list.appendSlice(orig_fr_row[0..fr_col]);
     try list.appendSlice(orig_to_row[to_col..to_node_len]);
+
     const new_fst, const new_lst = try fromStr(allocator, list.items);
-    try link(fr_node.prev, new_fst.next);
-    try link(new_lst.prev, to_node.next);
+    try replaceSegment(.{ fr_node, to_node }, .{ new_fst.next, new_lst.prev });
 
-    // var new_fr_char: usize = undefined;
-    try (try getNode(root, fr_row)).getPart(compare_buf[1..], fr_col, fr_col + 1);
-
+    try (try root.getNode(fr_row)).getPart(compare_buf[1..], fr_col, fr_col + 1);
     print("orig_to_char {}\n", .{compare_buf[0]});
     print("new_fr_char {}\n", .{compare_buf[1]});
     if (compare_buf[0] != compare_buf[1]) @panic("failed to parse on deletion!\n");
 }
 
-fn replace_new(allocator: Allocator, root: *Node, from: Point, to: Point, maybe_with: ?[]const u8) !void {
-    try delete_new(allocator, root, from, to);
-    try insert_new(allocator, root, from, maybe_with orelse return DllError.Other);
-}
-
-fn insert(allocator: Allocator, root: *Node, at: Point, maybe_with: ?[]const u8) !void {
-    try replace(allocator, root, at, at, maybe_with);
-}
-
-fn delete(allocator: Allocator, root: *Node, from: Point, to: Point) !void {
-    try replace(allocator, root, from, to, null);
+fn replace(allocator: Allocator, root: *Node, from: Point, to: Point, maybe_with: ?[]const u8) !void {
+    try delete(allocator, root, from, to);
+    try insert(allocator, root, from, maybe_with orelse return DllError.Other);
 }
 
 fn printLines(root: *Node) !void {
@@ -231,111 +275,6 @@ fn printNodes(root: *Node) !void {
     print("==================\n", .{});
 }
 
-/// connects the list ending on first and the list starting on second.
-///
-/// sets first.next = second, and second.prev = first
-fn link(first: ?*Node, second: ?*Node) !void {
-    (try unpack(*Node, first)).next = second;
-    (try unpack(*Node, second)).prev = first;
-}
-
-/// row 1-indexed, col 0-indexed
-fn replace(allocator: Allocator, root: *Node, from: Point, to: Point, maybe_with: ?[]const u8) !void {
-    print("===========================\n", .{});
-    print("replace\n", .{});
-    print("from {any}\n", .{from});
-    print("to {any}\n", .{to});
-    print("with {any}\n", .{maybe_with orelse null});
-
-    print("print root orig\n", .{});
-    try printNodes(root);
-
-    var wlen: usize = 0;
-    if (maybe_with) |with| {
-        wlen = with.len;
-    }
-
-    var fix_buf: [5 * MAX_ROW_LEN]u8 = .{0} ** (5 * MAX_ROW_LEN);
-
-    const fst_row: usize = from.row orelse 0;
-    const lst_row: usize = to.row orelse try getNumLinesAfter(root);
-    const fst_node = try getNode(root, fst_row);
-    const lst_node = try getNode(root, lst_row);
-    // const fst_len: usize = fst_node.getLen();
-    const fst_col: usize = from.col orelse 0;
-    const lst_len = try lst_node.getLen();
-    const lst_col = to.col orelse lst_len - 1;
-
-    const buf_size: usize = wlen + fst_col + lst_len - lst_col;
-    var buf = fix_buf[0..buf_size];
-
-    // var debug_buf: [100]u8 = .{0} ** 100;
-
-    print("buf_size {}\n", .{buf_size});
-    print("wlen {}\n", .{wlen});
-    print("from first line {}\n", .{fst_col});
-    print("from last line {}\n", .{lst_len - lst_col});
-    print("lst_len {}\n", .{lst_len});
-    print("lst_col {}\n", .{lst_col});
-
-    // try fst_node.getPart(&debug_buf, 0, fst_col);
-    try fst_node.getPart(buf[0..], 0, fst_col);
-    if (maybe_with) |with| {
-        for (with, fst_col..) |ch, i| {
-            buf[i] = ch;
-            // debug_buf[i] = ch;
-        }
-    }
-    try lst_node.getPart(buf[(fst_col + wlen)..], lst_col, lst_len);
-    // try lst_node.getPart(&debug_buf, lst_col, lst_len);
-
-    print("buf {any}\n", .{buf});
-    // print("debug_buf {any}\n", .{debug_buf});
-
-    const new_fst, const new_lst = try fromStr(allocator, buf);
-
-    print("print new_fst\n", .{});
-    try printNodes(new_fst);
-    // const old_fst = fst_node.prevF().?;
-    // const old_lst = lst_node.nextF().?;
-    // old_fst.next = new_fst.nextF();
-    // old_lst.prev = new_lst.prevF();
-    // (fst_node.prev orelse {
-    //     return DllError.Other;
-    // }).next = new_fst.next;
-    // (lst_node.next orelse {
-    //     return DllError.Other;
-    // }).prev = new_lst.prev;
-    // (try unpack(*Node, fst_node.prev)).next = new_fst.next;
-    // (try unpack(*Node, lst_node.next)).prev = new_lst.prev;
-
-    try link(fst_node.prev, new_fst.next);
-    try link(new_lst.prev, lst_node.next);
-
-    // const new_fst_mid = try getNode(new_fst, 1);
-    // const new_lst_mid = try getNodeRev(new_lst, 1);
-
-    // print("fst_node\n", .{});
-    // try printNode(fst_node);
-    // print("fst_node.prev\n", .{});
-    // try printNode(fst_node.prev);
-    // print("new_fst.next\n", .{});
-    // try printNode(new_fst.next);
-
-    // // print("val1\n", .{});
-    // // try printNode(lst_node.next.?.prev);
-    // // print("val1\n", .{});
-    // // try printNode(new_fst.next);
-    // // print("val1\n", .{});
-    // // try printNode(new_lst.prev);
-    // fst_node.prev.?.next = new_fst.next;
-    // lst_node.next.?.prev = new_lst.prev;
-
-    print("print root new\n", .{});
-    try printNodes(root);
-    print("===========================\n", .{});
-}
-
 /// NB excludes the given node, yields all following ones
 const NodeIterator = struct {
     curr: ?*Node,
@@ -369,7 +308,7 @@ const LineIterator = struct {
         var idx: usize = 0;
         var ret: ?[]const u8 = null;
         while (true) {
-            if (idx >= self.data.len) {
+            if (idx > self.data.len) {
                 return ret;
             }
             idx += 1;
@@ -388,9 +327,8 @@ fn initNode(allocator: Allocator, node: Node, maybe_data: ?[]const u8) !*Node {
     ret.* = node;
     ret.data[0] = '\n';
     if (maybe_data) |data| {
-        for (data[0..@min(data.len, MAX_ROW_LEN)], 0..) |ch, i| {
-            ret.data[i] = ch;
-        }
+        const len = @min(data.len, row_arr_d.len);
+        @memcpy(ret.data[0..len], data[0..len]);
         if (data.len == 0 or data[data.len - 1] != '\n') ret.data[data.len] = '\n';
     }
     // print("=====================\n", .{});
@@ -466,44 +404,18 @@ fn getLines(root: *Node, orig_buf: []u8, maybe_fst_line: ?usize, maybe_n_lines: 
     return orig_buf.len - buf.len;
 }
 
-fn getNode(root: *Node, index: usize) !*Node {
-    var curr: *Node = root;
-    var idx = index;
-    while (idx > 0) {
-        if (curr.node_type == NodeType.lst) {
-            return DllError.EofError;
-        }
-        curr = curr.next orelse return DllError.EofError;
-        idx -= 1;
-    }
-    return curr;
-}
-
-fn getNodeRev(root: *Node, index: usize) !*Node {
-    var curr: *Node = root;
-    var idx = index;
-    while (idx > 0) {
-        if (curr.node_type == NodeType.fst) {
-            return DllError.EofError;
-        }
-        curr = curr.prev orelse return DllError.EofError;
-        idx -= 1;
-    }
-    return curr;
-}
-
 /// write line with index index (relative to root) to buffer
 ///
 /// returns pointer to node, and bytes written
 ///
 /// may raise DllError
 fn getLine(root: *Node, buf: []u8, index: usize) !struct { *Node, usize } {
-    var curr = try getNode(root, index);
+    var curr = try root.getNode(index);
     return .{ curr, try curr.getData(buf) };
 }
 
 test "test fromStr" {
-    if (true) return error.SkipZigTest;
+    // if (true) return error.SkipZigTest;
     print("===============================================\n", .{});
     print("test fromStr\n", .{});
     var buf: [1000]u8 = .{0} ** 1000;
@@ -540,7 +452,7 @@ test "test fromStr" {
 }
 
 test "test LineIterator" {
-    if (true) return error.SkipZigTest;
+    // if (true) return error.SkipZigTest;
     print("===============================================\n", .{});
     print("test LineIterator\n", .{});
     var buf: [1000]u8 = undefined;
@@ -553,7 +465,7 @@ test "test LineIterator" {
 }
 
 test "test insert" {
-    if (true) return error.SkipZigTest;
+    // if (true) return error.SkipZigTest;
     print("===============================================\n", .{});
     print("test insert\n", .{});
     var buffer: [1000]u8 = undefined;
@@ -601,7 +513,7 @@ test "test insert" {
 
 test "insert after line vs before next line" {
     // print("{c}\n", .{170});
-    if (true) return error.SkipZigTest;
+    // if (true) return error.SkipZigTest;
     print("===============================================\n", .{});
     print("test insert after line vs before next line\n", .{});
     var buffer: [1000]u8 = undefined;
@@ -618,8 +530,8 @@ test "insert after line vs before next line" {
     const insert_str = "c";
     const at1 = point(1, 4);
     const at2 = point(2, 0);
-    try insert_new(allocator, root1, at1, insert_str);
-    try insert_new(allocator, root2, at2, insert_str);
+    try insert(allocator, root1, at1, insert_str);
+    try insert(allocator, root2, at2, insert_str);
     try printLines(root1);
     try printLines(root2);
 
@@ -633,10 +545,10 @@ test "insert after line vs before next line" {
     try expect(std.mem.eql(u8, ret_buf1[0..len1], ret_buf2[0..len1]));
 }
 
-test "replace_new wrap" {
-    if (true) return error.SkipZigTest;
+test "replace wrap" {
+    // if (true) return error.SkipZigTest;
     print("===============================================\n", .{});
-    print("replace_new wrap\n", .{});
+    print("replace wrap\n", .{});
     var buffer: [1000]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buffer);
     const allocator = fba.allocator();
@@ -651,8 +563,8 @@ test "replace_new wrap" {
     const insert_str = "c";
     const at1 = point(1, 4);
     const at2 = point(2, 0);
-    try replace_new(allocator, root1, at1, at2, insert_str);
-    try replace_new(allocator, root2, at2, at2, insert_str);
+    try replace(allocator, root1, at1, at2, insert_str);
+    try replace(allocator, root2, at2, at2, insert_str);
     try printLines(root1);
     try printLines(root2);
 
@@ -666,10 +578,10 @@ test "replace_new wrap" {
     try expect(std.mem.eql(u8, ret_buf1[0..len1], ret_buf2[0..len1]));
 }
 
-test "replace_new general" {
+test "replace general" {
     // if (true) return error.SkipZigTest;
     print("===============================================\n", .{});
-    print("replace_new general\n", .{});
+    print("replace general\n", .{});
     var buffer: [1000]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buffer);
     const allocator = fba.allocator();
@@ -687,8 +599,44 @@ test "replace_new general" {
     // const insert_str = "c";
     const at1 = point(1, 4);
     const at2 = point(5, 1);
-    try delete_new(allocator, root1, at1, at2);
-    // try replace_new(allocator, root2, at2, at2, insert_str);
+    try delete(allocator, root1, at1, at2);
+    // try replace(allocator, root2, at2, at2, insert_str);
+    try printLines(root1);
+    // try printLines(root2);
+
+    // var ret_buf1: [100]u8 = undefined;
+    // var ret_buf2: [100]u8 = undefined;
+    // const len1 = try toStr(root1, &ret_buf1);
+    // try expect(len1 == try toStr(root2, &ret_buf2));
+    // try printLines(root1);
+    // try printLines(root2);
+
+    // try expect(std.mem.eql(u8, ret_buf1[0..len1], ret_buf2[0..len1]));
+}
+
+test "delete all" {
+    // if (true) return error.SkipZigTest;
+    print("===============================================\n", .{});
+    print("delete all\n", .{});
+    var buffer: [1000]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buffer);
+    const allocator = fba.allocator();
+
+    var buf: [100]u8 = undefined;
+    const test_str = "bla\nbl\n\n\nbl\n";
+    try expect(test_str.len == 12);
+    @memcpy(buf[0..test_str.len], test_str);
+
+    const root1, _ = try fromStr(allocator, buf[0..test_str.len]);
+    print("orig\n", .{});
+    try printLines(root1);
+
+    // const root2, _ = try fromStr(allocator, buf[0..test_str.len]);
+    // const insert_str = "c";
+    const at1 = point(1, 4);
+    const at2 = point(7, 0);
+    try delete(allocator, root1, at1, at2);
+    // try replace(allocator, root2, at2, at2, insert_str);
     try printLines(root1);
     // try printLines(root2);
 
