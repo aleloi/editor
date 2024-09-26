@@ -36,57 +36,7 @@ var tty: fs.File = undefined;
 // https://chatgpt.com/share/43543411-1296-4086-990d-0df98b621321
 
 pub fn main() !void {
-    tty = try fs.cwd().openFile("/dev/tty", .{ .mode = .read_write });
-    defer tty.close();
-
-    try term_utils.uncook(tty);
-    defer term_utils.cook(tty) catch {};
-
-    try getInp();
-
-    size = try getSize();
-
-    var fds: [1]posix.pollfd = .{.{
-        .fd = tty.handle,
-        .events = posix.POLL.IN,
-        .revents = undefined,
-    }};
-
-    try render(null);
-
-    while (true) {
-        // var buffer: [1]u8 = undefined;
-        // _ = try tty.read(&buffer);
-
-        _ = try posix.poll(&fds, -1);
-        var buffer: [10]u8 = .{255} ** 10;
-        const num_read = try tty.read(&buffer);
-        if (num_read == 0) continue;
-
-        if (num_read == 0) unreachable;
-        // if (num_read > 1) {
-        //     // TODO return error so that deferred uncooking may work
-        //     //unreachable;
-        //     return;
-        // }
-        // try parse_utils.parse(buffer[0..num_read]);
-
-        if (buffer[0] == 'q') {
-            return;
-        } else if (buffer[0] == 'j') {
-            // next line
-            if (lines_read + 20 > size.height and first_line < lines_read - 20) {
-                first_line += 1;
-            }
-        } else if (buffer[0] == 'k') {
-            // previous line
-            if (first_line > 0) {
-                first_line -= 1;
-            }
-        }
-        try render(buffer[0..num_read]);
     }
-}
 
 /// render the current view
 fn render(maybe_bytes: ?[]const u8) !void {
