@@ -61,8 +61,12 @@ pub const RenderBuffer = struct {
     /// viewport.start.row.
     viewport: ViewPort,
 
-    fn init(alloc: std.mem.Allocator, viewport: ViewPort) !@This() {
-        var res: @This() = .{ .lines = undefined, .slices = undefined, .viewport = viewport };
+    alloc: std.mem.Allocator,
+
+    /// Create a RenderBuffer and initialize it with the desired width
+    /// and height. That way .fillFromText can work without any allocations.
+    pub fn init(alloc: std.mem.Allocator, viewport: ViewPort) !@This() {
+        var res: @This() = .{.alloc=alloc, .lines = undefined, .slices = undefined, .viewport = viewport };
         res.lines = try @TypeOf(res.lines).initCapacity(alloc, viewport.height);
         errdefer {
             for (res.lines.items) |line| {
@@ -80,7 +84,7 @@ pub const RenderBuffer = struct {
         return res;
     }
 
-    fn resize(self: *@This(), alloc: std.mem.Allocator, viewport: ViewPort) !void {
+    pub fn resize(self: *@This(), viewport: ViewPort) !void {
         // do this last when we know everything succeeds.
         defer self.viewport = viewport;
 
@@ -88,18 +92,19 @@ pub const RenderBuffer = struct {
             const l = self.lines.pop();
             l.deinit();
         }
-        //if (self.lines.capa)
 
         try self.lines.ensureTotalCapacity(viewport.height);
         for (self.lines.items) |*itm| {
             try itm.*.ensureTotalCapacity(viewport.width);
         }
         while (self.lines.items.len < viewport.height) {
-            self.lines.appendAssumeCapacity(try Line.initCapacity(alloc, viewport.width));
+            self.lines.appendAssumeCapacity(try Line.initCapacity(self.alloc, viewport.width));
         }
+
+        try self.slices.ensureTotalCapacity(viewport.height);
     }
 
-    fn deinit(self: *@This()) void {
+    pub fn deinit(self: *@This()) void {
         self.slices.deinit();
         for (self.lines.items) |line| {
             line.deinit();
@@ -112,6 +117,7 @@ pub const RenderBuffer = struct {
     /// port. Extracts the part that will be visible.
     pub fn fillFromText(self: *@This(), text: []const u8) []const LineSlice {
         std.debug.assert(self.lines.items.len == self.viewport.height);
+        std.debug.assert(self.slices.capacity >= self.viewport.height);
 
         self.slices.clearRetainingCapacity();
         for (self.lines.items) |*line| {
@@ -126,7 +132,8 @@ pub const RenderBuffer = struct {
 
         for (text) |c| {
             const pos: Pos = iter.next().?;
-            std.debug.assert(pos.row <= self.viewport.height);
+            if (pos.row >= self.viewport.height) break;
+
             const curr_line: *Line = &self.lines.items[pos.row];
             const relative_pos: isize = @as(isize, @intCast(pos.col)) - offset;
 
@@ -137,13 +144,14 @@ pub const RenderBuffer = struct {
                 curr_line.*.appendAssumeCapacity(c);
             }
 
-            // WRONG, because then we skip too short lines! They should be empty instead.
             const has_not_reached_window: bool = relative_pos < 0;
-            // if (has_not_reached_window) continue;
 
             // Update or set what we know about the current row.
-            const is_past_window: bool = relative_pos >= self.viewport.width;
-            const curr_line_slice = LineSlice{ .line = curr_line.*.items, .line_continues_past_buf = is_past_window, .line_ends_before_buf = has_not_reached_window };
+            const is_past_window: bool = relative_pos > self.viewport.width or
+                (relative_pos == self.viewport.width and c != '\n');
+            const curr_line_slice = LineSlice { .line = curr_line.*.items,
+                                               .line_continues_past_buf = is_past_window,
+                                               .line_ends_before_buf = has_not_reached_window };
             std.debug.assert(self.slices.items.len == pos.row or self.slices.items.len == pos.row + 1);
             if (self.slices.items.len == pos.row) {
                 self.slices.appendAssumeCapacity(curr_line_slice);
@@ -174,7 +182,7 @@ test "can resize to larger no leaks" {
     const vp = ViewPort{ .start = .{ .row = 0, .col = 0 }, .height = 3, .width = 4 };
     const vp2 = ViewPort{ .start = .{ .row = 0, .col = 0 }, .height = 4, .width = 5 };
     var rb = try RenderBuffer.init(test_alloc, vp);
-    try rb.resize(test_alloc, vp2);
+    try rb.resize(vp2);
     rb.deinit();
 }
 
@@ -182,7 +190,7 @@ test "can resize to smaller no leaks" {
     const vp = ViewPort{ .start = .{ .row = 0, .col = 0 }, .height = 3, .width = 4 };
     const vp2 = ViewPort{ .start = .{ .row = 0, .col = 0 }, .height = 1, .width = 1 };
     var rb = try RenderBuffer.init(test_alloc, vp);
-    try rb.resize(test_alloc, vp2);
+    try rb.resize(vp2);
     rb.deinit();
 }
 
@@ -206,7 +214,7 @@ test "can write in buffer after resize" {
     defer rb.deinit();
 
     const vp2 = ViewPort{ .start = .{ .row = 0, .col = 0 }, .height = 10, .width = 10 };
-    try rb.resize(test_alloc, vp2);
+    try rb.resize(vp2);
 
     rb.lines.items[9].appendAssumeCapacity(0);
     rb.lines.items[9].appendAssumeCapacity(1);
@@ -294,7 +302,7 @@ test "fill after resize" {
     defer rb.deinit();
 
     const vp2 = ViewPort{ .start = .{ .row = 0, .col = 0 }, .height = 10, .width = 10 };
-    try rb.resize(test_alloc, vp2);
+    try rb.resize(vp2);
 
     const text = " ";
 
@@ -303,4 +311,40 @@ test "fill after resize" {
     try expect(lines[0].line.len == 1);
     try expect(lines[0].line[0] == ' ');
     try expect(!lines[0].line_continues_past_buf);
+}
+
+
+test "fill with too many lines" {
+    const vp = ViewPort{ .start = .{ .row = 0, .col = 2 }, .height = 1, .width = 1 };
+    var rb = try RenderBuffer.init(test_alloc, vp);
+    defer rb.deinit();
+
+    // const vp2 = ViewPort{ .start = .{ .row = 0, .col = 0 }, .height = 10, .width = 10 };
+    // try rb.resize(test_alloc, vp2);
+
+    const text = "\n\n\n";
+
+    const lines = rb.fillFromText(text);
+    try expect(lines.len == 1);
+    try expect(lines[0].line.len == 0);
+    try expect(!lines[0].line_continues_past_buf);
+    try expect(lines[0].line_ends_before_buf);
+}
+
+// Not sure why somebody would want that, but it's good to know we don't crash.
+test "edge case empty viewport" {
+    const vp = ViewPort{ .start = .{ .row = 0, .col = 0 }, .height = 1, .width = 0 };
+    var rb = try RenderBuffer.init(test_alloc, vp);
+    defer rb.deinit();
+
+    // const vp2 = ViewPort{ .start = .{ .row = 0, .col = 0 }, .height = 10, .width = 10 };
+    // try rb.resize(test_alloc, vp2);
+
+    const text = "\n\n\n";
+
+    const lines = rb.fillFromText(text);
+    try expect(lines.len == 1);
+    try expect(lines[0].line.len == 0);
+    try expect(!lines[0].line_continues_past_buf);
+    try expect(!lines[0].line_ends_before_buf);
 }

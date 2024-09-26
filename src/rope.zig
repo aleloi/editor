@@ -11,7 +11,7 @@ const std = @import("std");
 // https://github.com/Aandreba/zigrc. Currently using single-threaded
 // Rc. Guard refcount-changing operations with a lock if doing
 // multithreading.
-const Rc = @import("zigrc").Rc;
+pub const Rc = @import("zigrc").Rc;
 
 /// For convenient indexing inside a Rope. Refers to a row, col
 /// position relative to a root node. The first byte is always `row=0,
