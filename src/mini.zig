@@ -159,15 +159,9 @@ pub fn main() !void {
                 return;
             } else if (genericMatch(cmd2, &j_eq)) {
                 // next line
-                // if (lines_read + 20 > size.height and first_line < lines_read - 20) {
-                //     first_line += 1;
-                // }
                 moveView(1);
             } else if (genericMatch(cmd2, &k_eq)) {
                 // previous line
-                // if (first_line > 0) {
-                //     first_line -= 1;
-                // }
                 moveView(-1);
             } else if (genericMatch(cmd2, &c_arrows)) {
                 // ctrl+arrow, move cursor
@@ -272,13 +266,15 @@ fn render_cursor(writer: anytype) !void {
     // if cursor.pos
     if (view.fst <= row and row < view.lst) {
         try moveCursor(writer, row - view.fst, col);
-        // // white bg
-        // try writer.writeAll("\x1B[47m");
-        // reverse fg/bg
-        try writer.writeAll("\x1B[7m");
         // blink
         try writer.writeAll("\x1B[5m");
-        // try writer.writeAll(" ");
+        // reverse fg/bg
+        try writer.writeAll("\x1B[7m");
+        // if part of selection, underline
+        if (isBetween(cursor.selection.anchor, cursor.pos, cursor.selection.head) or isBetween(cursor.selection.head, cursor.pos, cursor.selection.anchor)) {
+            // underline
+            try writer.writeAll("\x1B[4m");
+        }
         var byte = lines[row][col];
         if (byte < 32 or byte > 126) byte = ' ';
         try writer.writeByte(byte);
