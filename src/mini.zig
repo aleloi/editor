@@ -19,7 +19,7 @@ var lines_read: usize = 0;
 var lines: [5 * 1024 * 1024][]const u8 = undefined;
 /// index of first visible line
 // var first_line: usize = 0;
-const bottom_ui_rows: usize = 3;
+const bottom_ui_rows: usize = 4;
 /// rows reserved for permanent ui
 const non_content_rows = bottom_ui_rows;
 /// rows available for file content
@@ -43,10 +43,6 @@ fn get_writer(buf: []u8) std.io.GenericWriter {
 var parse_buf: [1000]u8 = .{128} ** 1000;
 var parse_fbs = std.io.fixedBufferStream(&parse_buf);
 const parse_writer = parse_fbs.writer();
-// try writer.print("bla", .{});
-// print("{any}\n", .{fbs.getWritten()[3..]});
-// fbs.reset();
-// print("{s}\n", .{@typeName(@TypeOf(fbs.getWritten()))});
 
 /// tries to match the slice needle to a slice in haystack.
 fn genericMatch(needle: []const u8, haystack: []const []const u8) bool {
@@ -58,6 +54,52 @@ fn genericMatch(needle: []const u8, haystack: []const []const u8) bool {
     return false;
 }
 
+/// tries to match a direction to the end of slice str
+fn matchDirSuffix(str: []const u8) !Direction {
+    for (arrows, dirs) |arrow, dir| {
+        // print("'{s}' '{s}'\n", .{ str[(str.len - arrow.len)..], arrow });
+        if (std.mem.eql(u8, str[(str.len - arrow.len)..], arrow)) {
+            return dir;
+        }
+    }
+    return error.Error;
+}
+
+/// return return the pair sorted by row, col
+fn getSortedPoints(A: Point, B: Point) struct { Point, Point } {
+    if (B.row < A.row) return .{ B, A };
+    if (B.row == A.row and B.col < A.col) return .{ B, A };
+    return .{ A, B };
+}
+
+/// strict cmp, bool (A < B)
+fn cmpPoints(A: Point, B: Point) bool {
+    if (B.row < A.row) return false;
+    if (B.row == A.row and B.col <= A.col) return false;
+    return true;
+}
+
+/// is A, B, C sorted?
+/// specifically: is A <= B < C
+fn isBetween(A: Point, B: Point, C: Point) bool {
+    return ((!cmpPoints(B, A)) and cmpPoints(B, C));
+}
+
+const Direction = enum {
+    up,
+    down,
+    left,
+    right,
+    fn pt(self: Direction) struct { isize, isize } {
+        switch (self) {
+            Direction.up => return .{ -1, 0 },
+            Direction.down => return .{ 1, 0 },
+            Direction.left => return .{ 0, -1 },
+            Direction.right => return .{ 0, 1 },
+        }
+    }
+};
+
 /// quit commands
 const q_eq: [3][]const u8 = .{ "ESC", "Q", "q" };
 /// down commands
@@ -65,8 +107,12 @@ const j_eq: [3][]const u8 = .{ "DOWN", "J", "j" };
 /// up commands
 const k_eq: [3][]const u8 = .{ "UP", "K", "k" };
 
+const dirs: [4]Direction = .{ Direction.up, Direction.down, Direction.left, Direction.right };
+const arrows: [4][]const u8 = .{ "UP", "DOWN", "LEFT", "RIGHT" };
 /// cursor up
 const c_arrows: [4][]const u8 = .{ "CTRL+UP", "CTRL+DOWN", "CTRL+LEFT", "CTRL+RIGHT" };
+/// change selection
+const sc_arrows: [4][]const u8 = .{ "SHIFT+CTRL+UP", "SHIFT+CTRL+DOWN", "SHIFT+CTRL+LEFT", "SHIFT+CTRL+RIGHT" };
 
 pub fn main() !void {
     tty = try fs.cwd().openFile("/dev/tty", .{ .mode = .read_write });
@@ -125,19 +171,16 @@ pub fn main() !void {
                 moveView(-1);
             } else if (genericMatch(cmd2, &c_arrows)) {
                 // ctrl+arrow, move cursor
-                if (std.mem.eql(u8, cmd2, c_arrows[0])) {
-                    // up
-                    moveVCursorRel(-1, 0);
-                } else if (std.mem.eql(u8, cmd2, c_arrows[1])) {
-                    // down
-                    moveVCursorRel(1, 0);
-                } else if (std.mem.eql(u8, cmd2, c_arrows[2])) {
-                    // left
-                    moveVCursorRel(0, -1);
-                } else if (std.mem.eql(u8, cmd2, c_arrows[3])) {
-                    // right
-                    moveVCursorRel(0, 1);
-                }
+                //  move cursor
+                moveVCursorStep(try matchDirSuffix(cmd2));
+                // reset selection
+                cursor.selection = emptySel(cursor.pos);
+            } else if (genericMatch(cmd2, &sc_arrows)) {
+                // shift+ctrl+arrow, move cursor & selection
+                // move cursor
+                moveVCursorStep(try matchDirSuffix(cmd2));
+                // update selection
+                cursor.selection.head = cursor.pos;
             }
             try render(cmd);
         }
@@ -153,6 +196,7 @@ fn render(maybe_bytes: ?[]const u8) !void {
     try clear(writer);
 
     try render_file_content(writer);
+    try render_sel(writer);
     try render_cursor(writer);
     try render_bottom_ui(maybe_bytes, writer);
     _ = &maybe_bytes;
@@ -193,7 +237,33 @@ fn render_bottom_ui(maybe_bytes: ?[]const u8, arg_writer: anytype) !void {
     }
     // status row
     try moveCursor(writer, size.height - 3, 0);
-    try writer.print("view {any}       cursor {any} (move using CTRL+<arrow>)", .{ view, cursor.pos });
+    try writer.print("selection anchor {any: >3}   head {any: >3}", .{ cursor.selection.anchor, cursor.selection.head });
+    try moveCursor(writer, size.height - 4, 0);
+    try writer.print("view {any: >3}   cursor {any: >3} (move using CTRL+<arrow>)", .{ view, cursor.pos });
+}
+
+fn render_sel(writer: anytype) !void {
+    const min_p, const max_p = getSortedPoints(cursor.selection.anchor, cursor.selection.head);
+    const min_r = min_p.row;
+    const max_r = max_p.row;
+    // var max_c: usize = undefined;
+    // for (min_r..(max_r + 1)) |row_i| max_c = @max(max_c, lines[row_i].len);
+    // if (max_r <= min_r) return;
+    for (min_r..(max_r + 1)) |row_i| {
+        if (row_i < view.fst or view.lst <= row_i) continue;
+        const line = lines[row_i];
+        for (0..line.len, line) |col_i, ch| {
+            if (isBetween(min_p, point(row_i, col_i), max_p)) {
+                try moveCursor(writer, row_i - view.fst, col_i);
+                // underline
+                try writer.writeAll("\x1B[4m");
+                var byte = ch;
+                if (byte < 32 or byte > 126) byte = ' ';
+                try writer.writeByte(byte);
+                try writer.writeAll("\x1B[0m");
+            }
+        }
+    }
 }
 
 fn render_cursor(writer: anytype) !void {
@@ -291,10 +361,66 @@ fn point(row: usize, col: usize) Point {
 const Cursor = struct {
     pos: Point,
     target_col: usize = 0,
-    selection: ?Selection = null,
+    selection: Selection = emptySel(point(1, 0)),
 };
 const def_pos = point(0, 0);
 var cursor: Cursor = .{ .pos = def_pos, .selection = emptySel(def_pos) };
+
+/// move the cursor single step in cardinal direction
+fn moveVCursorStep(dir: Direction) void {
+    // current pos
+    var crow = cursor.pos.row;
+    var ccol = cursor.pos.col;
+    //
+    const n_row = lines_read;
+
+    switch (dir) {
+        Direction.up => {
+            if (crow < 1) {
+                ccol = 0;
+            } else {
+                crow -= 1;
+                ccol = @min(lines[crow].len, cursor.target_col);
+            }
+        },
+        Direction.down => {
+            if (crow >= n_row - 1) {
+                ccol = lines[crow].len;
+            } else {
+                crow += 1;
+                ccol = @min(lines[crow].len, cursor.target_col);
+            }
+        },
+        Direction.left => {
+            if (ccol < 1) {
+                if (crow > 0) {
+                    crow -= 1;
+                    ccol = lines[crow].len;
+                } else {}
+            } else {
+                ccol -= 1;
+            }
+            cursor.target_col = ccol;
+        },
+        Direction.right => {
+            if (ccol >= lines[crow].len) {
+                if (crow < n_row - 1) {
+                    crow += 1;
+                    ccol = 0;
+                } else {}
+            } else {
+                ccol += 1;
+            }
+            cursor.target_col = ccol;
+        },
+    }
+    // save changes
+    cursor.pos = point(crow, ccol);
+
+    // make sure the cursor is visible after being moved
+    if (crow < view.fst) moveView(-@as(isize, @intCast(view.fst - crow)));
+    if (crow >= view.lst) moveView(@intCast(view.lst + 1 - crow));
+}
 
 /// move the the cursor
 fn moveVCursorRel(rows: isize, cols: isize) void {
@@ -308,13 +434,15 @@ fn moveVCursorRel(rows: isize, cols: isize) void {
     const clen = lines[crow].len;
     if (cols == 0) {
         ccol = @min(clen, cursor.target_col);
-    } else if (cols > 0) {
-        ccol += @min(clen - ccol, @abs(cols));
-        cursor.target_col = ccol;
-    } else if (cols < 0) {
-        ccol -= @min(ccol, @abs(cols));
+    } else {
+        if (cols > 0) {
+            ccol += @min(clen - ccol, @abs(cols));
+        } else if (cols < 0) {
+            ccol -= @min(ccol, @abs(cols));
+        }
         cursor.target_col = ccol;
     }
+    // save changes
     cursor.pos = point(crow, ccol);
 
     // make sure the cursor is visible after being moved
