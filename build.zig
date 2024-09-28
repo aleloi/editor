@@ -133,12 +133,12 @@ pub fn build(b: *std.Build) void {
 
     // Any other code to define dependencies would
     // probably be here.
-    const zigrc_dep = b.dependency("zigrc", .{
-        .target = target,
-        .optimize = optimize
-    });
+    // const zigrc_dep = b.dependency("zigrc", .{
+    //     .target = target,
+    //     .optimize = optimize
+    // });
 
-    const zigrc_mod = &zigrc_dep.artifact("zig-rc").root_module;
+    //const zigrc_mod = &zigrc_dep.artifact("zig-rc").root_module;
     const leaking_rc_mod = b.createModule(.{
         .root_source_file = b.path("src/leaking_rc.zig"),
         // .imports = &.{
@@ -153,17 +153,17 @@ pub fn build(b: *std.Build) void {
     const rope_mod = b.createModule(.{
         .root_source_file = b.path("src/rope.zig"),
         .imports = &.{
-            .{ .name = "zigrc", .module=zigrc_mod}
+            //.{ .name = "zigrc", .module=zigrc_mod}
         }
     });
 
-    exe.root_module.addImport("zigrc", zigrc_mod);
+    //exe.root_module.addImport("zigrc", zigrc_mod);
     exe.root_module.addImport("rope", rope_mod);
     rope_unit_tests.root_module.addImport("rope", rope_mod);
-    rope_unit_tests.root_module.addImport("zigrc", zigrc_mod);
+    //rope_unit_tests.root_module.addImport("zigrc", zigrc_mod);
 
     rope_private_unit_tests.root_module.addImport("rope", rope_mod);
-    rope_private_unit_tests.root_module.addImport("zigrc", zigrc_mod);
+    //rope_private_unit_tests.root_module.addImport("zigrc", zigrc_mod);
     rb_tests.root_module.addImport("rope", rope_mod);
     doc_tests.root_module.addImport("rope", rope_mod);
 
