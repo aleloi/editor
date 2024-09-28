@@ -75,54 +75,36 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
-    // Creates a step for unit testing. This only builds the test executable
-    // but does not run it.
-    // const lib_unit_tests = b.addTest(.{
-    //     .root_source_file = b.path("src/rope.zig"),
-    //     .target = target,
-    //     .optimize = optimize,
-    // });
-
-    // const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
-
-    const rope_unit_tests = b.addTest(.{
-        .root_source_file = b.path("tests/rope_tests.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const rope_private_unit_tests = b.addTest(.{
+    const rope_mod = b.createModule(.{
         .root_source_file = b.path("src/rope.zig"),
-        .target = target,
-        .optimize = optimize,
+        .imports = &.{
+            //.{ .name = "zigrc", .module=zigrc_mod}
+        }
     });
-
-    const rb_tests = b.addTest(.{
-        .root_source_file = b.path("src/render_buffer.zig"),
-        .target=target,
-        .optimize=optimize,
-    });
-
-    const doc_tests = b.addTest(.{
-        .root_source_file = b.path("src/document.zig"),
-        .target=target,
-        .optimize=optimize,
-    });
-
-    const run_rb_tests = b.addRunArtifact(rb_tests);
-    const run_doc_tests = b.addRunArtifact(doc_tests);
-    const run_exe_unit_tests = b.addRunArtifact(rope_unit_tests);
-    const run_private_unit_tests = b.addRunArtifact(rope_private_unit_tests);
 
     // Similar to creating the run step earlier, this exposes a `test` step to
     // the `zig build --help` menu, providing a way for the user to request
     // running the unit tests.
     const test_step = b.step("test", "Run unit tests");
-    // test_step.dependOn(&run_lib_unit_tests.step);
-    test_step.dependOn(&run_exe_unit_tests.step);
-    test_step.dependOn(&run_private_unit_tests.step);
-    test_step.dependOn(&run_rb_tests.step);
-    test_step.dependOn(&run_doc_tests.step);
+
+    // const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
+    const test_files: []const [] const u8 = &.{"tests/rope_tests.zig",
+                                               "src/rope.zig",
+                                               "src/render_buffer.zig",
+                                               "src/document.zig",
+                                               };
+    for (test_files) |test_file| {
+        const test_set = b.addTest(.{
+            .root_source_file = b.path(test_file),
+            .target = target,
+            .optimize = optimize,
+        });
+        test_set.root_module.addImport("rope", rope_mod);
+        var run_test_set = b.addRunArtifact(test_set);
+        run_test_set.has_side_effects = true;
+        test_step.dependOn(&run_test_set.step);
+    }
+
 
     const exe_check = b.addExecutable(.{
         .name = "foo",
@@ -131,41 +113,29 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    exe_check.root_module.addImport("rope", rope_mod);
+
     // Any other code to define dependencies would
     // probably be here.
-    const zigrc_dep = b.dependency("zigrc", .{
-        .target = target,
-        .optimize = optimize
-    });
+    // const zigrc_dep = b.dependency("zigrc", .{
+    //     .target = target,
+    //     .optimize = optimize
+    // });
 
-    const zigrc_mod = &zigrc_dep.artifact("zig-rc").root_module;
-    const leaking_rc_mod = b.createModule(.{
-        .root_source_file = b.path("src/leaking_rc.zig"),
-        // .imports = &.{
-        //     .{ .name = "zigrc", .module=zigrc_mod}
-        // }
-    });
+    //const zigrc_mod = &zigrc_dep.artifact("zig-rc").root_module;
+    // const leaking_rc_mod = b.createModule(.{
+    //     .root_source_file = b.path("src/leaking_rc.zig"),
+    //     // .imports = &.{
+    //     //     .{ .name = "zigrc", .module=zigrc_mod}
+    //     // }
+    // });
 
-    //zigrc_mod = leaking_rc_mod;
-    _ = leaking_rc_mod;
+    // //zigrc_mod = leaking_rc_mod;
+    // _ = leaking_rc_mod;
 
 
-    const rope_mod = b.createModule(.{
-        .root_source_file = b.path("src/rope.zig"),
-        .imports = &.{
-            .{ .name = "zigrc", .module=zigrc_mod}
-        }
-    });
-
-    exe.root_module.addImport("zigrc", zigrc_mod);
+    //exe.root_module.addImport("zigrc", zigrc_mod);
     exe.root_module.addImport("rope", rope_mod);
-    rope_unit_tests.root_module.addImport("rope", rope_mod);
-    rope_unit_tests.root_module.addImport("zigrc", zigrc_mod);
-
-    rope_private_unit_tests.root_module.addImport("rope", rope_mod);
-    rope_private_unit_tests.root_module.addImport("zigrc", zigrc_mod);
-    rb_tests.root_module.addImport("rope", rope_mod);
-    doc_tests.root_module.addImport("rope", rope_mod);
 
     // These two lines you might want to copy
     // (make sure to rename 'exe_check')

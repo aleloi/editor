@@ -1,6 +1,4 @@
-//! mini, main editor entrypoint
 const std = @import("std");
-const rope = @import("rope");
 const fs = std.fs;
 const io = std.io;
 const mem = std.mem;
@@ -15,11 +13,16 @@ const term_utils = @import("term_utils.zig");
 const parse_utils = @import("parse_utils.zig");
 const write_utils = @import("write_utils.zig");
 
+const doc = @import("document.zig");
+const Cursor = doc.Cursor;
+const Selection = doc.Selection;
+const Point = doc.Pos;
+
+
 var file_content: [5 * 1024 * 1024]u8 = undefined;
 var bytes_read: usize = 0;
-var lines_read: usize = 0;
-var lines: [5 * 1024 * 1024][]const u8 = undefined;
-
+const lines_read: usize = 100;
+//var lines: [5 * 1024 * 1024][]const u8 = undefined;
 /// index of first visible line
 // var first_line: usize = 0;
 const bottom_ui_rows: usize = 4;
@@ -124,7 +127,7 @@ pub fn main() !void {
     try term_utils.uncook(tty);
     defer term_utils.cook(tty) catch {};
 
-    try getInp();
+    //try getInp();
 
     size = try getSize();
 
@@ -135,11 +138,29 @@ pub fn main() !void {
     }};
 
     // set last visible line
-    moveView(0);
+    // moveView(0);
 
-    try render(null);
+    //try render(null, .{});
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const alloc = gpa.allocator();
+
+    const rope = try doc.openAsRope(alloc, "src/mini.zig"); // 6k
+    //const rope = try doc.openAsRope(alloc, "/home/alex/Downloads/data-1717158044627.csv"); // 17M
+    //const rope = try doc.openAsRope(alloc, "/home/alex/Downloads/data-1720544170329.csv"); // 100k
+    // /home/alex/Downloads/data-1717158044627.csv 17M
+
+    defer rope.releaseWithFn(@TypeOf(rope.value.*).deinit);
+    var vp = doc.ViewPort {.height = size.height-2, .width=size.width-1};
+    var dc = try doc.Document.init(alloc, vp.height, vp.width, rope);
+
+    {
+        const txt = try dc.getText();
+        try render(&.{}, dc.cursor, txt, vp);
+    }
 
     while (true) {
+        print("\nvp: {}, dc.vp: {}\n\n", .{vp, dc.render_buffer.viewport});
         // var buffer: [1]u8 = undefined;
         // _ = try tty.read(&buffer);
 
@@ -153,6 +174,7 @@ pub fn main() !void {
         var cmd_it = parse_utils.InputSeqIterator{ .bytes = buffer[0..num_read] };
 
         while (try cmd_it.next()) |cmd| {
+            const txt_old = try dc.getText();
             print("\n single cmd {any}\n", .{cmd});
             parse_fbs.reset();
             try parse_utils.parseWrite(cmd, parse_writer);
@@ -165,60 +187,83 @@ pub fn main() !void {
                 // if (lines_read + 20 > size.height and first_line < lines_read - 20) {
                 //     first_line += 1;
                 // }
-                moveView(1);
+                vp = moveView(1, vp);
             } else if (genericMatch(cmd2, &k_eq)) {
                 // previous line
                 // if (first_line > 0) {
                 //     first_line -= 1;
                 // }
-                moveView(-1);
+                vp = moveView(-1, vp);
             } else if (genericMatch(cmd2, &c_arrows)) {
                 // ctrl+arrow, move cursor
                 //  move cursor
-                moveVCursorStep(try matchDirSuffix(cmd2));
+                moveVCursorStep(&dc.cursor, try matchDirSuffix(cmd2),  &vp, txt_old);
                 // reset selection
-                cursor.selection = emptySel(cursor.pos);
+                dc.cursor.selection = Selection.emptySel(dc.cursor.pos);
             } else if (genericMatch(cmd2, &sc_arrows)) {
                 // shift+ctrl+arrow, move cursor & selection
                 // move cursor
-                moveVCursorStep(try matchDirSuffix(cmd2));
+                moveVCursorStep(&dc.cursor, try matchDirSuffix(cmd2),  &vp, txt_old);
                 // update selection
-                cursor.selection.head = cursor.pos;
+                dc.cursor.selection.head = dc.cursor.pos;
             }
-            try render(cmd);
+            print("\nAfter handling commands: vp: {}, dc.vp: {}\n\n", .{vp, dc.render_buffer.viewport});
+            try dc.render_buffer.resize(vp);
+            const txt = try dc.getText();
+            //try render(&.{}, dc.cursor, txt, vp);
+            try render(cmd, dc.cursor, txt, vp);
         }
     }
 }
 
+// fn renderLines(writer: anytype, lns: []const doc.LineSlice, bottom_bytes: []const u8, cursor: Cursor) !void {
+//     // const tty_writer = tty.writer();
+//     // var buf_writer = std.io.bufferedWriter(tty_writer);
+//     // const writer = buf_writer.writer();
+
+//     //try clear(writer);
+
+//     for (lns, 0..) |line, i| {
+//         try writeLine(writer, line.line, i);
+//     }
+
+//     //try render_bottom_ui(bottom_bytes, writer, cursor);
+//     //try buf_writer.flush();
+// }
+
 /// render the current view
-fn render(maybe_bytes: ?[]const u8) !void {
+fn render(maybe_bytes: ?[]const u8, cursor: Cursor, lns: [] const doc.LineSlice, view: doc.ViewPort) !void {
     const tty_writer = tty.writer();
     var buf_writer = std.io.bufferedWriter(tty_writer);
     const writer = buf_writer.writer();
 
     try clear(writer);
 
-    try render_file_content(writer);
-    try render_sel(writer);
-    try render_cursor(writer);
-    try render_bottom_ui(maybe_bytes, writer);
+    for (lns, 0..) |line, i| {
+        try writeLine(writer, line.line, i);
+    }
+
+    //try renderLines(writer);
+    try render_sel(writer, cursor, view, lns);
+    try render_cursor(writer, cursor, view, lns);
+    try render_bottom_ui(maybe_bytes, writer, cursor, view);
     _ = &maybe_bytes;
 
     try buf_writer.flush();
 }
 
-/// render file content
-fn render_file_content(writer: anytype) !void {
-    // const last_line: usize = @min(first_line + content_rows, lines_read);
-    const first_line = view.fst;
-    const last_line = view.lst;
-    for (first_line..last_line) |line_ind| {
-        try writeLine(writer, lines[line_ind], line_ind - first_line);
-    }
-}
+// /// render file content
+// fn render_file_content(writer: anytype) !void {
+//     // const last_line: usize = @min(first_line + content_rows, lines_read);
+//     const first_line = view.fst;
+//     const last_line = view.start.row+view.height;
+//     for (first_line..last_line) |line_ind| {
+//         try writeLine(writer, lines[line_ind], line_ind - first_line);
+//     }
+// }
 
 /// render bottom ui
-fn render_bottom_ui(maybe_bytes: ?[]const u8, arg_writer: anytype) !void {
+fn render_bottom_ui(maybe_bytes: ?[]const u8, arg_writer: anytype, cursor: Cursor, view: doc.ViewPort) !void {
     // var rawbuf
     var multi_writer = write_utils.multiWriter(arg_writer);
     const writer = multi_writer.writer();
@@ -245,7 +290,7 @@ fn render_bottom_ui(maybe_bytes: ?[]const u8, arg_writer: anytype) !void {
     try writer.print("view {any: >3}   cursor {any: >3} (move using CTRL+<arrow>)", .{ view, cursor.pos });
 }
 
-fn render_sel(writer: anytype) !void {
+fn render_sel(writer: anytype, cursor: Cursor, view: doc.ViewPort, lns: []const doc.LineSlice) !void {
     const min_p, const max_p = getSortedPoints(cursor.selection.anchor, cursor.selection.head);
     const min_r = min_p.row;
     const max_r = max_p.row;
@@ -253,11 +298,15 @@ fn render_sel(writer: anytype) !void {
     // for (min_r..(max_r + 1)) |row_i| max_c = @max(max_c, lines[row_i].len);
     // if (max_r <= min_r) return;
     for (min_r..(max_r + 1)) |row_i| {
-        if (row_i < view.fst or view.lst <= row_i) continue;
-        const line = lines[row_i];
-        for (0..line.len, line) |col_i, ch| {
-            if (isBetween(min_p, point(row_i, col_i), max_p)) {
-                try moveCursor(writer, row_i - view.fst, col_i);
+        if (row_i < view.start.row or view.start.row+view.height <= row_i) continue;
+        const rel_row_i = row_i - view.start.row;
+        const line: doc.LineSlice = lns[rel_row_i];
+
+        // TODO the below is only correct for col==0
+        std.debug.assert(view.start.col==0);
+        for (0..line.line.len, line.line) |col_i, ch| {
+            if (isBetween(min_p, .{.row=row_i, .col=col_i}, max_p)) {
+                try moveCursor(writer, row_i - view.start.row, col_i);
                 // underline
                 try writer.writeAll("\x1B[4m");
                 var byte = ch;
@@ -269,12 +318,12 @@ fn render_sel(writer: anytype) !void {
     }
 }
 
-fn render_cursor(writer: anytype) !void {
+fn render_cursor(writer: anytype, cursor: Cursor, view: doc.ViewPort, lns: []const doc.LineSlice) !void {
     const row = cursor.pos.row;
     const col = cursor.pos.col;
     // if cursor.pos
-    if (view.fst <= row and row < view.lst) {
-        try moveCursor(writer, row - view.fst, col);
+    if (view.start.row <= row and row < view.start.row+view.height) {
+        try moveCursor(writer, row - view.start.row, col);
         // // white bg
         // try writer.writeAll("\x1B[47m");
         // reverse fg/bg
@@ -282,7 +331,12 @@ fn render_cursor(writer: anytype) !void {
         // blink
         try writer.writeAll("\x1B[5m");
         // try writer.writeAll(" ");
-        var byte = lines[row][col];
+
+        // TODO fix so it works without the condition:
+        std.debug.assert(view.start.col == 0);
+        const line = lns[row-view.start.row].line;
+        //if (col >= line.len)
+        var byte = if (col < line.len) line[col] else 0;
         if (byte < 32 or byte > 126) byte = ' ';
         try writer.writeByte(byte);
         try writer.writeAll("\x1B[0m");
@@ -322,58 +376,67 @@ fn getSize() !Size {
     };
 }
 
-/// read file content from stdin.
-/// raise exception if longer than 5 MB.
-fn getInp() !void {
-    const stdin = std.io.getStdIn().reader();
-    bytes_read = try stdin.readAll(&file_content);
-    if (bytes_read == file_content.len) @panic("getInp file too long");
-    var split_it = std.mem.splitSequence(u8, file_content[0..bytes_read], "\n");
-    while (split_it.next()) |line| {
-        lines[lines_read] = line;
-        lines_read += 1;
-    }
-}
+// /// read file content from stdin.
+// /// raise exception if longer than 5 MB.
+// fn getInp() !void {
+//     const stdin = std.io.getStdIn().reader();
+//     bytes_read = try stdin.readAll(&file_content);
+//     if (bytes_read == file_content.len) @panic("getInp file too long");
+//     var split_it = std.mem.splitSequence(u8, file_content[0..bytes_read], "\n");
+//     while (split_it.next()) |line| {
+//         lines[lines_read] = line;
+//         lines_read += 1;
+//     }
+// }
 /// first line, last line. lst not included
-const View = struct {
-    fst: usize = 0,
-    lst: usize = 0,
-};
-var view: View = .{};
-fn moveView(ind: isize) void {
+// const View = struct {
+//     fst: usize = 0,
+//     lst: usize = 0,
+// };
+// var view: View = .{};
+fn moveView(ind: isize, vp: doc.ViewPort) doc.ViewPort {
+    var vpc = vp;
+    //const lines_read: usize = 100;
     if (ind > 0) {
-        view.fst += @min(@abs(ind), lines_read - view.fst - @min(10, lines_read));
+        vpc.start.row += @min(@abs(ind), lines_read - vpc.start.row - @min(10, lines_read));
     } else if (ind < 0) {
         // const abs: usize = ind;
-        view.fst -= @min(@abs(ind), view.fst);
+        vpc.start.row -= @min(@abs(ind), vpc.start.row);
     }
-    view.lst = @min(lines_read, view.fst + content_rows);
-    if (view.lst <= view.fst or view.lst > lines_read + 1) panic("moveView caused invalid view {any}\n", .{view});
+    //view.start.row+view.height = @min(lines_read, view.start.row + content_rows);
+    //if (view.start.row+view.height <= view.start.row or view.start.row+view.height > lines_read + 1) panic("moveView caused invalid view {any}\n", .{view});
+    return vpc;
 }
 
-// 0-indexing
-const Point = struct {
-    row: usize,
-    col: usize,
-};
+// // 0-indexing
+// const Point = struct {
+//     row: usize,
+//     col: usize,
+// };
 fn point(row: usize, col: usize) Point {
     return .{ .row = row, .col = col };
 }
 
-/// a point, and a selection
-const Cursor = struct {
-    pos: Point,
-    target_col: usize = 0,
-    selection: Selection = emptySel(point(1, 0)),
-};
-const def_pos = point(0, 0);
-var cursor: Cursor = .{ .pos = def_pos, .selection = emptySel(def_pos) };
+// /// a point, and a selection
+// const Cursor = struct {
+//     pos: Point,
+//     target_col: usize = 0,
+//     selection: Selection = emptySel(point(1, 0)),
+// };
+// const def_pos = point(0, 0);
+// var cursor: Cursor = .{ .pos = def_pos, .selection = emptySel(def_pos) };
 
 /// move the cursor single step in cardinal direction
-fn moveVCursorStep(dir: Direction) void {
+fn moveVCursorStep(cursor: *Cursor, dir: Direction, view: *doc.ViewPort, lns: [] const doc.LineSlice) void {
+    // TODO breaks when cursor is outside of viewport...
+    std.debug.assert(view.*.start.col==0);
+    std.debug.assert(view.*.start.row <= cursor.*.pos.row and cursor.*.pos.row < view.*.start.row + view.*.height);
+
     // current pos
     var crow = cursor.pos.row;
     var ccol = cursor.pos.col;
+
+    const view_start_row = view.*.start.row;
     //
     const n_row = lines_read;
 
@@ -383,22 +446,22 @@ fn moveVCursorStep(dir: Direction) void {
                 ccol = 0;
             } else {
                 crow -= 1;
-                ccol = @min(lines[crow].len, cursor.target_col);
+                ccol = @min(lns[crow-view_start_row].line.len, cursor.target_col);
             }
         },
         Direction.down => {
             if (crow >= n_row - 1) {
-                ccol = lines[crow].len;
+                ccol = lns[crow-view_start_row].line.len;
             } else {
                 crow += 1;
-                ccol = @min(lines[crow].len, cursor.target_col);
+                ccol = @min(lns[crow-view_start_row].line.len, cursor.target_col);
             }
         },
         Direction.left => {
             if (ccol < 1) {
                 if (crow > 0) {
                     crow -= 1;
-                    ccol = lines[crow].len;
+                    ccol = lns[crow-view_start_row].line.len;
                 } else {}
             } else {
                 ccol -= 1;
@@ -406,7 +469,7 @@ fn moveVCursorStep(dir: Direction) void {
             cursor.target_col = ccol;
         },
         Direction.right => {
-            if (ccol >= lines[crow].len) {
+            if (ccol >= lns[crow-view_start_row].line.len) {
                 if (crow < n_row - 1) {
                     crow += 1;
                     ccol = 0;
@@ -418,61 +481,63 @@ fn moveVCursorStep(dir: Direction) void {
         },
     }
     // save changes
-    cursor.pos = point(crow, ccol);
+    cursor.pos = .{.row=crow, .col=ccol};
 
     // make sure the cursor is visible after being moved
-    if (crow < view.fst) moveView(-@as(isize, @intCast(view.fst - crow)));
-    if (crow >= view.lst) moveView(@intCast(view.lst + 1 - crow));
+    if (crow < view.start.row) view.* = moveView(-@as(isize, @intCast(view.start.row - crow)), view.*);
+    if (crow >= view.start.row+view.height) view.* = moveView(@intCast(view.start.row+view.height + 1 - crow), view.*);
 }
 
-/// move the the cursor
-fn moveVCursorRel(rows: isize, cols: isize) void {
-    var crow = cursor.pos.row;
-    var ccol = cursor.pos.col;
-    if (rows < 0) {
-        crow -= @min(crow, @abs(rows));
-    } else if (rows > 0) {
-        crow += @min(lines_read - crow, @abs(rows));
-    }
-    const clen = lines[crow].len;
-    if (cols == 0) {
-        ccol = @min(clen, cursor.target_col);
-    } else {
-        if (cols > 0) {
-            ccol += @min(clen - ccol, @abs(cols));
-        } else if (cols < 0) {
-            ccol -= @min(ccol, @abs(cols));
-        }
-        cursor.target_col = ccol;
-    }
-    // save changes
-    cursor.pos = point(crow, ccol);
+// /// move the the cursor
+// fn moveVCursorRel(rows: isize, cols: isize, cursor: *Cursor, view: *doc.ViewPort, lns: []const doc.LineSlice) void {
+//     var crow = cursor.pos.row;
+//     var ccol = cursor.pos.col;
+//     const view_start_row = view.*.start.row;
 
-    // make sure the cursor is visible after being moved
-    if (crow < view.fst) moveView(-@as(isize, @intCast(view.fst - crow)));
-    if (crow >= view.lst) moveView(@intCast(view.lst + 1 - crow));
-}
+//     if (rows < 0) {
+//         crow -= @min(crow, @abs(rows));
+//     } else if (rows > 0) {
+//         crow += @min(lines_read - crow, @abs(rows));
+//     }
+//     const clen = lns[crow-view_start_row].len;
+//     if (cols == 0) {
+//         ccol = @min(clen, cursor.target_col);
+//     } else {
+//         if (cols > 0) {
+//             ccol += @min(clen - ccol, @abs(cols));
+//         } else if (cols < 0) {
+//             ccol -= @min(ccol, @abs(cols));
+//         }
+//         cursor.target_col = ccol;
+//     }
+//     // save changes
+//     cursor.pos = .{.row=crow, .colr=ccol};
 
-/// try to move the cursor to target point
-fn setVCursorPos(target: Point) void {
-    var trow = target.row;
-    var tcol = target.col;
-    if (trow > lines_read) trow = lines_read;
-    const tlen = lines[trow].len;
-    if (tcol > tlen) tcol = tlen;
-    cursor.pos = point(trow, tcol);
-    cursor.target_col = tcol;
-}
+//     // make sure the cursor is visible after being moved
+//     if (crow < view.start.row) moveView(-@as(isize, @intCast(view.start.row - crow)));
+//     if (crow >= view.start.row+view.height) moveView(@intCast(view.start.row+view.height + 1 - crow));
+// }
 
-/// movable head, immovable anchor.
-/// regular cursor/empty selection: head = anchor
-const Selection = struct {
-    head: Point,
-    anchor: Point,
-};
-fn emptySel(pos: Point) Selection {
-    return .{ .head = pos, .anchor = pos };
-}
+// /// try to move the cursor to target point
+// fn setVCursorPos(target: Point, cursor: *Cursor) void {
+//     var trow = target.row;
+//     var tcol = target.col;
+//     if (trow > lines_read) trow = lines_read;
+//     const tlen = lines[trow].len;
+//     if (tcol > tlen) tcol = tlen;
+//     cursor.pos = .{.row=trow, .col=tcol};
+//     cursor.target_col = tcol;
+// }
+
+// /// movable head, immovable anchor.
+// /// regular cursor/empty selection: head = anchor
+// const Selection = struct {
+//     head: Point,
+//     anchor: Point,
+// };
+// fn emptySel(pos: Point) Selection {
+//     return .{ .head = pos, .anchor = pos };
+// }
 
 // this seems to ensure all tests are run
 // when placed in the root file
