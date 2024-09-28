@@ -35,12 +35,7 @@ var tty: fs.File = undefined;
 // https://ziglang.org/documentation/master/std/#std.posix.poll
 // https://chatgpt.com/share/43543411-1296-4086-990d-0df98b621321
 
-fn get_writer(buf: []u8) std.io.GenericWriter {
-    var fbs = std.io.fixedBufferStream(&buf);
-    return fbs.writer();
-}
-
-var parse_buf: [1000]u8 = .{128} ** 1000;
+var parse_buf: [1000]u8 = undefined;
 var parse_fbs = std.io.fixedBufferStream(&parse_buf);
 const parse_writer = parse_fbs.writer();
 
@@ -141,7 +136,7 @@ pub fn main() !void {
         // _ = try tty.read(&buffer);
 
         _ = try posix.poll(&fds, -1);
-        var buffer: [1000]u8 = .{255} ** 1000;
+        var buffer: [1000]u8 = undefined;
 
         const num_read = try tty.read(&buffer);
         if (num_read == 0) continue;
