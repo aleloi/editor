@@ -17,11 +17,14 @@ const doc = @import("document.zig");
 const Cursor = doc.Cursor;
 const Selection = doc.Selection;
 const Point = doc.Pos;
+const Direction = doc.Direction;
+
+var document: doc.Document = undefined;
 
 
-var file_content: [5 * 1024 * 1024]u8 = undefined;
-var bytes_read: usize = 0;
-const lines_read: usize = 100;
+//var file_content: [5 * 1024 * 1024]u8 = undefined;
+//var bytes_read: usize = 0;
+//const lines_read: usize = 100;
 //var lines: [5 * 1024 * 1024][]const u8 = undefined;
 /// index of first visible line
 // var first_line: usize = 0;
@@ -91,20 +94,20 @@ fn isBetween(A: Point, B: Point, C: Point) bool {
     return ((!cmpPoints(B, A)) and cmpPoints(B, C));
 }
 
-const Direction = enum {
-    up,
-    down,
-    left,
-    right,
-    fn pt(self: Direction) struct { isize, isize } {
-        switch (self) {
-            Direction.up => return .{ -1, 0 },
-            Direction.down => return .{ 1, 0 },
-            Direction.left => return .{ 0, -1 },
-            Direction.right => return .{ 0, 1 },
-        }
-    }
-};
+// const Direction = enum {
+//     up,
+//     down,
+//     left,
+//     right,
+//     fn pt(self: Direction) struct { isize, isize } {
+//         switch (self) {
+//             Direction.up => return .{ -1, 0 },
+//             Direction.down => return .{ 1, 0 },
+//             Direction.left => return .{ 0, -1 },
+//             Direction.right => return .{ 0, 1 },
+//         }
+//     }
+// };
 
 /// quit commands
 const q_eq: [3][]const u8 = .{ "ESC", "Q", "q" };
@@ -145,22 +148,22 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const alloc = gpa.allocator();
 
-    const rope = try doc.openAsRope(alloc, "src/mini.zig"); // 6k
+    const rope = try doc.openAsRope(alloc, "src/document.zig"); // 6k
     //const rope = try doc.openAsRope(alloc, "/home/alex/Downloads/data-1717158044627.csv"); // 17M
     //const rope = try doc.openAsRope(alloc, "/home/alex/Downloads/data-1720544170329.csv"); // 100k
     // /home/alex/Downloads/data-1717158044627.csv 17M
 
     defer rope.releaseWithFn(@TypeOf(rope.value.*).deinit);
-    var vp = doc.ViewPort {.height = size.height-2, .width=size.width-1};
-    var dc = try doc.Document.init(alloc, vp.height, vp.width, rope);
+    //const vp = doc.ViewPort {.height = size.height-2, .width=size.width-1};
+    var dc = try doc.Document.init(alloc, size.height-2, size.width-1, rope);
 
     {
         const txt = try dc.getText();
-        try render(&.{}, dc.cursor, txt, vp);
+        try render(&.{}, dc.cursor, txt, dc.render_buffer.viewport);
     }
 
     while (true) {
-        print("\nvp: {}, dc.vp: {}\n\n", .{vp, dc.render_buffer.viewport});
+        //print("\nvp: {}, dc.vp: {}\n\n", .{vp, dc.render_buffer.viewport});
         // var buffer: [1]u8 = undefined;
         // _ = try tty.read(&buffer);
 
@@ -174,7 +177,7 @@ pub fn main() !void {
         var cmd_it = parse_utils.InputSeqIterator{ .bytes = buffer[0..num_read] };
 
         while (try cmd_it.next()) |cmd| {
-            const txt_old = try dc.getText();
+            //const txt_old = try dc.getText();
             print("\n single cmd {any}\n", .{cmd});
             parse_fbs.reset();
             try parse_utils.parseWrite(cmd, parse_writer);
@@ -187,31 +190,37 @@ pub fn main() !void {
                 // if (lines_read + 20 > size.height and first_line < lines_read - 20) {
                 //     first_line += 1;
                 // }
-                vp = moveView(1, vp);
+                dc.moveView(1);
+                //vp = moveView(1, vp);
             } else if (genericMatch(cmd2, &k_eq)) {
                 // previous line
                 // if (first_line > 0) {
                 //     first_line -= 1;
                 // }
-                vp = moveView(-1, vp);
+                dc.moveView(-1);
+                // vp = moveView(-1, vp);
             } else if (genericMatch(cmd2, &c_arrows)) {
                 // ctrl+arrow, move cursor
                 //  move cursor
-                moveVCursorStep(&dc.cursor, try matchDirSuffix(cmd2),  &vp, txt_old);
+                //dc.cursor.move()
+                dc.moveCursor(try matchDirSuffix(cmd2));
+                // moveVCursorStep(&dc.cursor, try matchDirSuffix(cmd2),  &vp, txt_old);
                 // reset selection
                 dc.cursor.selection = Selection.emptySel(dc.cursor.pos);
             } else if (genericMatch(cmd2, &sc_arrows)) {
                 // shift+ctrl+arrow, move cursor & selection
                 // move cursor
-                moveVCursorStep(&dc.cursor, try matchDirSuffix(cmd2),  &vp, txt_old);
+                dc.moveCursor(try matchDirSuffix(cmd2));
+                // moveVCursorStep(&dc.cursor, try matchDirSuffix(cmd2),  &vp, txt_old);
                 // update selection
                 dc.cursor.selection.head = dc.cursor.pos;
             }
-            print("\nAfter handling commands: vp: {}, dc.vp: {}\n\n", .{vp, dc.render_buffer.viewport});
-            try dc.render_buffer.resize(vp);
+            print("\nAfter handling commands: dc.vp: {}\n", .{ dc.render_buffer.viewport});
+            print("Cursor: {}\n\n", .{dc.cursor});
+            //try dc.render_buffer.resize(vp);
             const txt = try dc.getText();
             //try render(&.{}, dc.cursor, txt, vp);
-            try render(cmd, dc.cursor, txt, vp);
+            try render(cmd, dc.cursor, txt, dc.render_buffer.viewport);
         }
     }
 }
@@ -300,6 +309,7 @@ fn render_sel(writer: anytype, cursor: Cursor, view: doc.ViewPort, lns: []const 
     for (min_r..(max_r + 1)) |row_i| {
         if (row_i < view.start.row or view.start.row+view.height <= row_i) continue;
         const rel_row_i = row_i - view.start.row;
+        if (rel_row_i >= lns.len) continue;
         const line: doc.LineSlice = lns[rel_row_i];
 
         // TODO the below is only correct for col==0
@@ -334,6 +344,7 @@ fn render_cursor(writer: anytype, cursor: Cursor, view: doc.ViewPort, lns: []con
 
         // TODO fix so it works without the condition:
         std.debug.assert(view.start.col == 0);
+        if (row-view.start.row >= lns.len) return;
         const line = lns[row-view.start.row].line;
         //if (col >= line.len)
         var byte = if (col < line.len) line[col] else 0;
@@ -388,34 +399,34 @@ fn getSize() !Size {
 //         lines_read += 1;
 //     }
 // }
-/// first line, last line. lst not included
+// / first line, last line. lst not included
 // const View = struct {
 //     fst: usize = 0,
 //     lst: usize = 0,
 // };
 // var view: View = .{};
-fn moveView(ind: isize, vp: doc.ViewPort) doc.ViewPort {
-    var vpc = vp;
-    //const lines_read: usize = 100;
-    if (ind > 0) {
-        vpc.start.row += @min(@abs(ind), lines_read - vpc.start.row - @min(10, lines_read));
-    } else if (ind < 0) {
-        // const abs: usize = ind;
-        vpc.start.row -= @min(@abs(ind), vpc.start.row);
-    }
-    //view.start.row+view.height = @min(lines_read, view.start.row + content_rows);
-    //if (view.start.row+view.height <= view.start.row or view.start.row+view.height > lines_read + 1) panic("moveView caused invalid view {any}\n", .{view});
-    return vpc;
-}
+// fn moveView(ind: isize, vp: doc.ViewPort) doc.ViewPort {
+//     var vpc = vp;
+//     //const lines_read: usize = 100;
+//     if (ind > 0) {
+//         vpc.start.row += @min(@abs(ind), lines_read - vpc.start.row - @min(10, lines_read));
+//     } else if (ind < 0) {
+//         // const abs: usize = ind;
+//         vpc.start.row -= @min(@abs(ind), vpc.start.row);
+//     }
+//     //view.start.row+view.height = @min(lines_read, view.start.row + content_rows);
+//     //if (view.start.row+view.height <= view.start.row or view.start.row+view.height > lines_read + 1) panic("moveView caused invalid view {any}\n", .{view});
+//     return vpc;
+// }
 
 // // 0-indexing
 // const Point = struct {
 //     row: usize,
 //     col: usize,
 // };
-fn point(row: usize, col: usize) Point {
-    return .{ .row = row, .col = col };
-}
+// fn point(row: usize, col: usize) Point {
+//     return .{ .row = row, .col = col };
+// }
 
 // /// a point, and a selection
 // const Cursor = struct {
@@ -426,67 +437,67 @@ fn point(row: usize, col: usize) Point {
 // const def_pos = point(0, 0);
 // var cursor: Cursor = .{ .pos = def_pos, .selection = emptySel(def_pos) };
 
-/// move the cursor single step in cardinal direction
-fn moveVCursorStep(cursor: *Cursor, dir: Direction, view: *doc.ViewPort, lns: [] const doc.LineSlice) void {
-    // TODO breaks when cursor is outside of viewport...
-    std.debug.assert(view.*.start.col==0);
-    std.debug.assert(view.*.start.row <= cursor.*.pos.row and cursor.*.pos.row < view.*.start.row + view.*.height);
+// /// move the cursor single step in cardinal direction
+// fn moveVCursorStep(cursor: *Cursor, dir: Direction, view: *doc.ViewPort, lns: [] const doc.LineSlice) void {
+//     // TODO breaks when cursor is outside of viewport...
+//     std.debug.assert(view.*.start.col==0);
+//     std.debug.assert(view.*.start.row <= cursor.*.pos.row and cursor.*.pos.row < view.*.start.row + view.*.height);
 
-    // current pos
-    var crow = cursor.pos.row;
-    var ccol = cursor.pos.col;
+//     // current pos
+//     var crow = cursor.pos.row;
+//     var ccol = cursor.pos.col;
 
-    const view_start_row = view.*.start.row;
-    //
-    const n_row = lines_read;
+//     const view_start_row = view.*.start.row;
+//     //
+//     const n_row = lines_read;
 
-    switch (dir) {
-        Direction.up => {
-            if (crow < 1) {
-                ccol = 0;
-            } else {
-                crow -= 1;
-                ccol = @min(lns[crow-view_start_row].line.len, cursor.target_col);
-            }
-        },
-        Direction.down => {
-            if (crow >= n_row - 1) {
-                ccol = lns[crow-view_start_row].line.len;
-            } else {
-                crow += 1;
-                ccol = @min(lns[crow-view_start_row].line.len, cursor.target_col);
-            }
-        },
-        Direction.left => {
-            if (ccol < 1) {
-                if (crow > 0) {
-                    crow -= 1;
-                    ccol = lns[crow-view_start_row].line.len;
-                } else {}
-            } else {
-                ccol -= 1;
-            }
-            cursor.target_col = ccol;
-        },
-        Direction.right => {
-            if (ccol >= lns[crow-view_start_row].line.len) {
-                if (crow < n_row - 1) {
-                    crow += 1;
-                    ccol = 0;
-                } else {}
-            } else {
-                ccol += 1;
-            }
-            cursor.target_col = ccol;
-        },
-    }
-    // save changes
-    cursor.pos = .{.row=crow, .col=ccol};
+//     switch (dir) {
+//         Direction.up => {
+//             if (crow < 1) {
+//                 ccol = 0;
+//             } else {
+//                 crow -= 1;
+//                 ccol = @min(lns[crow-view_start_row].line.len, cursor.target_col);
+//             }
+//         },
+//         Direction.down => {
+//             if (crow >= n_row - 1) {
+//                 ccol = lns[crow-view_start_row].line.len;
+//             } else {
+//                 crow += 1;
+//                 ccol = @min(lns[crow-view_start_row].line.len, cursor.target_col);
+//             }
+//         },
+//         Direction.left => {
+//             if (ccol < 1) {
+//                 if (crow > 0) {
+//                     crow -= 1;
+//                     ccol = lns[crow-view_start_row].line.len;
+//                 } else {}
+//             } else {
+//                 ccol -= 1;
+//             }
+//             cursor.target_col = ccol;
+//         },
+//         Direction.right => {
+//             if (ccol >= lns[crow-view_start_row].line.len) {
+//                 if (crow < n_row - 1) {
+//                     crow += 1;
+//                     ccol = 0;
+//                 } else {}
+//             } else {
+//                 ccol += 1;
+//             }
+//             cursor.target_col = ccol;
+//         },
+//     }
+//     // save changes
+//     cursor.pos = .{.row=crow, .col=ccol};
 
-    // make sure the cursor is visible after being moved
-    if (crow < view.start.row) view.* = moveView(-@as(isize, @intCast(view.start.row - crow)), view.*);
-    if (crow >= view.start.row+view.height) view.* = moveView(@intCast(view.start.row+view.height + 1 - crow), view.*);
-}
+//     // make sure the cursor is visible after being moved
+//     if (crow < view.start.row) view.* = moveView(-@as(isize, @intCast(view.start.row - crow)), view.*);
+//     if (crow >= view.start.row+view.height) view.* = moveView(@intCast(view.start.row+view.height + 1 - crow), view.*);
+// }
 
 // /// move the the cursor
 // fn moveVCursorRel(rows: isize, cols: isize, cursor: *Cursor, view: *doc.ViewPort, lns: []const doc.LineSlice) void {

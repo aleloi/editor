@@ -782,6 +782,12 @@ pub fn NodeBF(branch_factor: comptime_int,
         /// doesn't have that position; e.g. `.{row=0, col=1000}` when the
         /// first line has fewer than 1000 bytes. TODO: maybe return what
         /// went wrong? error.LineTooShort / error.TooFewLines?
+        ///
+        /// Semantics: suppose `text` is the list of bytes in `self`. Set
+        ///      `lines = [line + b'\n' for line in text.split('\n')]`
+        /// Then
+        ///   `lines[p.row][p.col] == (text+'\n')[offset]`
+        /// where `offset` is the return value.
         pub fn posToOffset(self: *const @This(), p: Pos) PosError!usize {
             switch (self.node) {
                 .leaf => |leaf_p| {
@@ -857,10 +863,38 @@ pub fn NodeBF(branch_factor: comptime_int,
                         start = end;
                         bytes_in_kids += kid_agg.num_bytes;
                     }
+                    if (start.row == p.row and start.col == p.col) {
+                        return bytes_in_kids;
+                    }
                     return PosError.InvalidPos;
                 },
             }
         }
+
+        /// Semantics: suppose `text` is the list of bytes in `self`. Set
+        ///      `lines = [line for line in text.split('\n')]`
+        /// Then this returns
+        ///   `len(lines[row])`
+        pub fn rowLength(self: Self, row: usize) PosError!usize {
+            const start_offset = try self.posToOffset(.{.row=row, .col=0});
+            const end_offset = self.posToOffset(.{.row=row+1, .col=0}) catch self.agg.num_bytes+1;
+
+            // just the distance is wrong, because end offset includes the \n.
+            return end_offset - start_offset - 1;
+        }
+
+        /// 1 plus the number of newline characters. Not sure if that's the right thing?
+        pub fn numRows(self: @This()) usize {
+            return self.agg.num_newlines + 1;
+        }
+
+        // /// document...
+        // pub fn lineLength(self: @This(), row: usize) PosError!usize {
+        //     if (row > self.numLines()) {
+        //         return PosError.InvalidPos;
+        //     }
+
+        // }
 
         /// Exported because it's called from tests. Not sure how to
         /// hide it from the API without having to move all tests to
@@ -915,7 +949,11 @@ pub fn NodeBF(branch_factor: comptime_int,
                 std.debug.print(" '{s}'\n", .{node.value.*.assertExtractLeaf().slice()});
             }
         }
+
+
     };
+
+
 }
 
 // Tests of private functions below. Tests of public API in

@@ -23,14 +23,85 @@ pub const Selection = struct {
     }
 };
 
-/// TODO document
-pub const Cursor = struct {
-    pos: Pos = .{.row=0, .col=0},
-    target_col: usize = 0,
-    selection: Selection = Selection.emptySel(.{.row=0, .col=0}),
+pub const Direction = enum {
+    up,
+    down,
+    left,
+    right,
+    pub fn pt(self: Direction) struct { isize, isize } {
+        switch (self) {
+            Direction.up => return .{ -1, 0 },
+            Direction.down => return .{ 1, 0 },
+            Direction.left => return .{ 0, -1 },
+            Direction.right => return .{ 0, 1 },
+        }
+    }
 };
 
 /// TODO document
+pub const Cursor = struct {
+    /// Relative to the document, not the view.
+    pos: Pos = .{.row=0, .col=0},
+    target_col: usize = 0,
+    selection: Selection = Selection.emptySel(.{.row=0, .col=0}),
+
+    // fn posInsideView ?
+
+    /// TODO: feedback when the cursor reaches the top / bottom?
+    pub fn move(self: *@This(), rp_rc: RopeRc, dir: Direction) void {
+        const rp: Rope = rp_rc.value.*;
+        const num_rows: usize = rp.numRows();
+
+        std.debug.assert(self.pos.row <= num_rows);
+        const curr_row_length: usize = rp.rowLength(self.pos.row) catch unreachable;
+        const p = self.pos;
+
+        // New row / col positions.
+        var n_row: usize = p.row;
+        var n_col: usize = p.col;
+        var n_target_col: usize = self.target_col;
+
+
+        switch (dir) {
+            .up => {
+                n_row = if (p.row > 0) p.row-1 else 0;
+                n_col = @min(rp.rowLength(n_row) catch unreachable, self.target_col);
+            },
+            .down => {
+                n_row = if (p.row < num_rows) p.row+1 else p.row;
+                n_col = @min(rp.rowLength(n_row) catch unreachable, self.target_col);
+            },
+            .left => {
+                if (p.col > 0) {
+                    n_col = p.col-1;
+                } else if (p.row > 0) {
+                    n_row -= 1;
+                    n_col = rp.rowLength(n_row) catch unreachable;
+                }
+                n_target_col = n_col;
+            },
+            .right => {
+                if (p.col < curr_row_length) {
+                    n_col = p.col+1;
+                } else if (p.row < num_rows) {
+                    n_row += 1;
+                    n_col = 0;
+                }
+                n_target_col = n_col;
+            }
+        }
+
+        self.pos = .{.row = n_row, .col = n_col};
+        self.target_col = n_target_col;
+    }
+
+    // fn up(self: @This()) Cursor {
+    //     const row = if (p.row > 0) p.row-1 else 0;
+    //     const col = @min(rp.rowLength(n_row), self.target_col);
+    // }
+};
+
+/// TODO document the document
 pub const Document = struct {
     // Somehow force this to always be non-empty through the type
     // system?
@@ -99,6 +170,37 @@ pub const Document = struct {
             i += 1;
         }
         return self.render_buffer.fillFromText(huge_buf[0..i]);
+    }
+
+    // /// How many lines does the current version of the doc have?
+    pub fn numRows(self: @This()) usize {
+        std.debug.assert(self.history.items.len > 0);
+        return self.history.items[0].value.*.numLines();
+        // const v_agg: rope.AggregateStats = self.history.items[0].value.*;
+        // return v.agg.num_newlines + 1;
+    }
+
+    // /// Passthough to curent history.
+    // pub fn rowLength(self: @This(), row: usize) !usize {
+    //     std.debug.assert(self.history.items.len > 0);
+    //     return self.history.items[0].value.*.rowLength(row);
+    // }
+
+    /// Too many layers? Also it makes sense to have this in Cursor
+    pub fn moveCursor(self: *@This(), dir: Direction) void {
+        self.cursor.move(self.history.items[0], dir);
+    }
+
+    pub fn moveView(self: *@This(), dy: isize) void {
+        const vp: *ViewPort = &self.render_buffer.viewport;
+        const num_rows = self.*.history.items[0].value.*.numRows();
+        const curr_row: * usize = &vp.*.start.row;
+        if (dy > 0) {
+            // Max viewpoint start is doc size + num visible rows:
+            curr_row.* = @min(curr_row.* + @abs(dy), num_rows + vp.*.height);
+        } else if (dy < 0) {
+            curr_row.* -= @min(@abs(dy), curr_row.*);
+        }
     }
 };
 

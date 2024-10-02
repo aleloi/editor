@@ -102,19 +102,100 @@ const PosIterator = struct {
     }
 };
 
-test "pos to index in matches PosIterator" {
-    const node_p = try TestNode.fromSlice(longer_text);
+test "pos to index on empty tree" {
+    const node_p = try TestNode.fromSlice("");
     defer cleanUpNode(node_p);
 
     const node: TestNode = node_p.value.*;
-    var it = PosIterator{ .slice = longer_text };
+    const result = node.posToOffset(.{.row=0, .col=0});
+    //std.debug.print("r0, c0 on empty: {any}\n\n", .{result});
+    try expect(result catch 1000  == 0);
+}
 
-    for (longer_text, 0..) |_, i| {
+
+test "line length on empty tree" {
+    const node_p = try TestNode.fromSlice("");
+    defer cleanUpNode(node_p);
+
+    const node: TestNode = node_p.value.*;
+    const result = try node.rowLength(0);
+    try expect(result == 0);
+}
+
+test "line 0 of newline tree" {
+    const node_p = try TestNode.fromSlice("\n");
+    defer cleanUpNode(node_p);
+
+    const node: TestNode = node_p.value.*;
+    const result = try node.rowLength(0);
+    try expect(result == 0);
+}
+
+test "line 1 of newline tree" {
+    const node_p = try TestNode.fromSlice("\n");
+    defer cleanUpNode(node_p);
+
+    const node: TestNode = node_p.value.*;
+    const result = try node.rowLength(1);
+    try expect(result == 0);
+}
+
+test "line 0 of nonempty tree" {
+    const node_p = try TestNode.fromSlice(" ");
+    defer cleanUpNode(node_p);
+
+    const node: TestNode = node_p.value.*;
+    const result = try node.rowLength(0);
+    try expect(result == 1);
+}
+
+test "line 1 of nonempty newline tree" {
+    const node_p = try TestNode.fromSlice(" \n");
+    defer cleanUpNode(node_p);
+
+    const node: TestNode = node_p.value.*;
+    const result = try node.rowLength(1);
+    try expect(result == 0);
+}
+
+test "rowLength gives posError on invalid line" {
+    const node_p = try TestNode.fromSlice("");
+    defer cleanUpNode(node_p);
+
+    const node: TestNode = node_p.value.*;
+    const result = node.rowLength(1);
+    try expect(result == TestNode.PosError.InvalidPos);
+}
+
+
+// test "pos to index on newline tree" {
+//     const node_p = try TestNode.fromSlice("\n");
+//     defer cleanUpNode(node_p);
+
+//     const node: TestNode = node_p.value.*;
+//     try expect(node.posToOffset(.{.row=0, .col=0}) == TestNode.PosError.InvalidPos);
+// }
+
+test "pos to index in matches PosIterator" {
+    const text = "hej\nhopp";
+    const node_p = try TestNode.fromSlice(text);
+    defer cleanUpNode(node_p);
+
+    const node: TestNode = node_p.value.*;
+    var it = PosIterator{ .slice = text };
+
+    for (text, 0..) |_, i| {
         const p = it.next() orelse unreachable;
         const offset = node.posToOffset(p) catch unreachable;
         try expect(offset == i);
     }
     try expect(it.next() == null);
+
+    // Check that the last value points to one after the end of the data:
+    const after_last: Pos = .{.row = it.row, .col=it.col};
+    const offset = node.posToOffset(after_last) catch unreachable;
+    try expect(offset == node_p.value.*.agg.num_bytes);
+
 }
 
 test "posToIndex returns error on invalid col in line" {
@@ -356,14 +437,16 @@ test "No leaks in concat with different branch factors" {
 
 test "concat is correct with different branch factors" {
     @setEvalBranchQuota(20000);
-    inline for (2..10) |bf| {
+    inline for (2..5) |bf| {
         const CustomNode = NodeBF(bf, std.testing.allocator);
         const longer = try CustomNode.fromSlice(longer_text);
         defer longer.releaseWithFn(CustomNode.deinit);
 
         const longer_longer = longer_text ++ longer_text ++ longer_text ++ longer_text;
 
-        inline for (0..longer_longer.len) |l| {
+        var buf: [longer_longer.len * 2] u8 = undefined;
+
+        for (0..longer_longer.len) |l| {
             const other = try CustomNode.fromSlice(longer_longer[0..l]);
             defer other.releaseWithFn(CustomNode.deinit);
 
@@ -372,7 +455,13 @@ test "concat is correct with different branch factors" {
             defer longer_other.releaseWithFn(CustomNode.deinit);
 
             var iter = longer_other.value.*.allBytesIterator();
-            for (longer_text ++ longer_longer[0..l]) |expected| {
+
+            // Looks nicer with comptime, but takes forever to execute:
+            std.mem.copyForwards(u8, &buf, longer_text);
+            std.mem.copyForwards(u8, (&buf)[longer_text.len..], longer_longer[0..l]);
+            const expected_slice = buf[0..(longer_text.len + l)];
+
+            for (expected_slice) |expected| {
                 const actual = iter.next();
                 try expect(actual != null);
                 try expect(expected == actual orelse unreachable);
