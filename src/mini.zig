@@ -270,7 +270,8 @@ fn render_cursor(writer: anytype) !void {
             // underline
             try writer.writeAll("\x1B[4m");
         }
-        var byte = lines[row][col];
+        var byte: u8 = ' ';
+        if (col < lines[row].len) byte = lines[row][col];
         if (byte < 32 or byte > 126) byte = ' ';
         try writer.writeByte(byte);
         try writer.writeAll("\x1B[0m");
