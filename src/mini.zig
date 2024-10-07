@@ -12,6 +12,7 @@ const format = @import("format.zig");
 const term_utils = @import("term_utils.zig");
 const parse_utils = @import("parse_utils.zig");
 const write_utils = @import("write_utils.zig");
+const misc_utils = @import("misc_utils.zig");
 
 var file_content: [5 * 1024 * 1024]u8 = undefined;
 var bytes_read: usize = 0;
@@ -24,6 +25,8 @@ const bottom_ui_rows: usize = 4;
 const non_content_rows = bottom_ui_rows;
 /// rows available for file content
 var content_rows: usize = undefined;
+/// cols reserved for line number
+var non_content_cols: usize = undefined;
 
 /// window dimensions
 var size: Size = undefined;
@@ -183,7 +186,9 @@ fn render(maybe_bytes: ?[]const u8) !void {
     const writer = buf_writer.writer();
 
     try clear(writer);
+    non_content_cols = 2 + misc_utils.numDigits(lines_read);
 
+    try render_line_numbers(writer);
     try render_file_content(writer);
     try render_sel(writer);
     try render_cursor(writer);
@@ -200,6 +205,22 @@ fn render_file_content(writer: anytype) !void {
     const last_line = view.lst;
     for (first_line..last_line) |line_ind| {
         try writeLine(writer, lines[line_ind], line_ind - first_line);
+    }
+}
+
+// render the line numbers
+fn render_line_numbers(writer: anytype) !void {
+    const first_line = view.fst;
+    const last_line = view.lst;
+    for (first_line..last_line) |line_ind| {
+        const pad_slice = misc_utils.spaces[0..(non_content_cols - misc_utils.numDigits(line_ind) - 1)];
+        try moveCursor(writer, line_ind - first_line, 0);
+        try writer.print("{s}{d}", .{ pad_slice, line_ind });
+    }
+    for (last_line..(view.fst + content_rows)) |line_ind| {
+        const pad_slice = misc_utils.spaces[0..(non_content_cols - 2)];
+        try moveCursor(writer, line_ind - first_line, 0);
+        try writer.print("{s}~", .{pad_slice});
     }
 }
 
@@ -260,7 +281,7 @@ fn render_cursor(writer: anytype) !void {
     const col = cursor.pos.col;
     // if cursor.pos
     if (view.fst <= row and row < view.lst) {
-        try moveCursor(writer, row - view.fst, col);
+        try moveCursor(writer, row - view.fst, col + non_content_cols);
         // blink
         try writer.writeAll("\x1B[5m");
         // reverse fg/bg
@@ -278,9 +299,9 @@ fn render_cursor(writer: anytype) !void {
     }
 }
 
-/// write <txt> to the buffer at row y col 0, applying format.myFmtLine
+/// write slice to the buffer at row y col 0, applying format.myFmtLine
 fn writeLine(writer: anytype, txt: []const u8, y: usize) !void {
-    try moveCursor(writer, y, 0);
+    try moveCursor(writer, y, non_content_cols);
     try writer.print("{}", .{format.myFmtLine(txt)});
 }
 
