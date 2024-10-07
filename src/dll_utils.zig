@@ -36,6 +36,19 @@ fn unpack(comptime T: type, maybe: ?T) !T {
     return DllError.UnpackError;
 }
 
+fn up(maybe: anytype) !@TypeOf(maybe orelse unreachable) {
+    return maybe orelse error.Null;
+}
+
+test "unpack " {
+    const logger = @import("logging.zig").default_logger;
+    var opt: ?u8 = undefined;
+
+    logger.debug("unpack {} \n", .{try up(opt)});
+    opt = null;
+    logger.debug("unpack {} \n", .{up(opt) catch 0});
+}
+
 const MAX_ROW_LEN: usize = 10;
 const row_arr: type = [MAX_ROW_LEN]u8;
 const row_arr_d: row_arr = .{0} ** MAX_ROW_LEN;
