@@ -39,6 +39,14 @@ fn levelAsText(comptime level: std.log.Level) []const u8 {
     };
 }
 
+fn getFileHandle(name: []const u8) !std.fs.File {
+    const dir: std.fs.Dir = std.fs.cwd();
+
+    return try dir.createFile(name, .{ .truncate = false });
+}
+var handle: std.fs.File = undefined;
+var file_writer: ?@TypeOf(handle.writer()) = null;
+
 pub fn myLogFn(
     comptime level: std.log.Level,
     comptime scope: @TypeOf(.EnumLiteral),
@@ -63,6 +71,8 @@ pub fn myLogFn(
     const stderr = std.io.getStdErr().writer();
     time_utils.writeTimestamp(time_utils.now(), stderr) catch return;
     stderr.print(prefix ++ format ++ "\n", args) catch return;
+    time_utils.writeTimestamp(time_utils.now(), file_writer orelse return) catch return;
+    (file_writer orelse return).print(prefix ++ format ++ "\n", args) catch return;
 }
 pub fn main() void {
     // Using the default scope:
@@ -82,3 +92,33 @@ pub fn main() void {
 /// IMPORTANT: needs ```pub const std_options = logging.std_options;``` in root file to work as intended
 ///
 pub const default_logger = std.log;
+
+// pub fn get_logger(comptime scope: ?@TypeOf(.EnumLiteral), file: ?[]const u8) !@TypeOf(std.log.scoped(scope orelse std.log.default_log_scope)) {
+//     handle = getFileHandle(file orelse "app.log") catch unreachable;
+//     defer handle.close();
+//     try handle.seekFromEnd(0);
+//     file_writer = handle.writer();
+
+//     // return std.log.scoped(scope orelse std.log.default_log_scope);
+// }
+
+pub fn logger_init(file: ?[]const u8) !void {
+    handle = getFileHandle(file orelse "app.log") catch unreachable;
+    // defer handle.close();
+    try handle.seekFromEnd(0);
+    file_writer = handle.writer();
+
+    default_logger.debug("logger initialized!", .{});
+    // return std.log.scoped(scope orelse std.log.default_log_scope);
+}
+
+pub fn logger_deinit() void {
+    // file_writer
+    // handle = getFileHandle(file orelse "app.log") catch unreachable;
+
+    defer handle.close();
+    // try handle.seekFromEnd(0);
+    // file_writer = handle.writer();
+
+    // return std.log.scoped(scope orelse std.log.default_log_scope);
+}
