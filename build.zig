@@ -34,6 +34,20 @@ pub fn build(b: *std.Build) void {
     b.default_step.dependOn(&docsget.step);
 
 
+    // TRACY
+    const tracy_enable = b.option(bool, "tracy_enable", "Enable profiling") orelse true;
+    const opts = b.addOptions();
+    opts.addOption(bool, "enable_tracy", tracy_enable);
+
+    const tracy = b.dependency("tracy", .{
+        .target = target,
+        .optimize = optimize,
+        .tracy_enable = tracy_enable,
+    });
+
+
+
+
     // This declares intent for the library to be installed into the standard
     // location when the user invokes the "install" step (the default step when
     // running `zig build`).
@@ -136,6 +150,9 @@ pub fn build(b: *std.Build) void {
 
     //exe.root_module.addImport("zigrc", zigrc_mod);
     exe.root_module.addImport("rope", rope_mod);
+    exe.root_module.addImport("tracy", tracy.module("tracy"));
+    exe.linkLibrary(tracy.artifact("tracy"));
+    exe.linkLibCpp();
 
     // These two lines you might want to copy
     // (make sure to rename 'exe_check')

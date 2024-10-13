@@ -19,6 +19,8 @@ const Selection = doc.Selection;
 const Point = doc.Pos;
 const Direction = doc.Direction;
 
+const tracy = @import("tracy");
+
 var document: doc.Document = undefined;
 
 
@@ -55,6 +57,8 @@ const parse_writer = parse_fbs.writer();
 
 /// tries to match the slice needle to a slice in haystack.
 fn genericMatch(needle: []const u8, haystack: []const []const u8) bool {
+    const zone = tracy.initZone(@src(), .{ .name = "generic match" });
+    defer zone.deinit();
     for (haystack) |straw| {
         if (std.mem.eql(u8, needle, straw)) {
             return true;
@@ -62,6 +66,11 @@ fn genericMatch(needle: []const u8, haystack: []const []const u8) bool {
     }
     return false;
 }
+
+// /// All insertable chars
+// fn justInsertableCharacters(chars: []const u8) bool {
+
+// }
 
 /// tries to match a direction to the end of slice str
 fn matchDirSuffix(str: []const u8) !Direction {
@@ -123,6 +132,21 @@ const c_arrows: [4][]const u8 = .{ "CTRL+UP", "CTRL+DOWN", "CTRL+LEFT", "CTRL+RI
 /// change selection
 const sc_arrows: [4][]const u8 = .{ "SHIFT+CTRL+UP", "SHIFT+CTRL+DOWN", "SHIFT+CTRL+LEFT", "SHIFT+CTRL+RIGHT" };
 
+const paste_sel: [1][]const u8 = .{ "CTRL+y" };
+
+const insert_mode: [1][]const u8 = .{"i"};
+
+const normal_mode: [1][]const u8 = .{"ASCII-ESC / ESC / CTRL+8"};
+const undo: [1][]const u8 = .{"CTRL+u"};
+
+
+const Mode = enum {
+    insert,
+    normal
+};
+
+var mode: Mode = .normal;
+
 pub fn main() !void {
     tty = try fs.cwd().openFile("/dev/tty", .{ .mode = .read_write });
     defer tty.close();
@@ -148,6 +172,7 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const alloc = gpa.allocator();
 
+
     const rope = try doc.openAsRope(alloc, "src/document.zig"); // 6k
     //const rope = try doc.openAsRope(alloc, "/home/alex/Downloads/data-1717158044627.csv"); // 17M
     //const rope = try doc.openAsRope(alloc, "/home/alex/Downloads/data-1720544170329.csv"); // 100k
@@ -170,13 +195,22 @@ pub fn main() !void {
         _ = try posix.poll(&fds, -1);
         var buffer: [1000]u8 = .{255} ** 1000;
 
-        const num_read = try tty.read(&buffer);
-        if (num_read == 0) continue;
+        var cmd_it = b: {
+            const zone = tracy.initZone(@src(), .{ .name = "Parsing into buffer" });
+            defer zone.deinit();
+            const num_read = try tty.read(&buffer);
+            if (num_read == 0) continue;
 
-        print("\nall bytes {any}\n", .{buffer[0..num_read]});
-        var cmd_it = parse_utils.InputSeqIterator{ .bytes = buffer[0..num_read] };
+            print("\nall bytes {any}\n", .{buffer[0..num_read]});
+            break :b parse_utils.InputSeqIterator{ .bytes = buffer[0..num_read] };
+        };
+
+
 
         while (try cmd_it.next()) |cmd| {
+            const zone = tracy.initZone(@src(), .{ .name = "Handling command" });
+            defer zone.deinit();
+
             //const txt_old = try dc.getText();
             print("\n single cmd {any}\n", .{cmd});
             parse_fbs.reset();
@@ -214,13 +248,38 @@ pub fn main() !void {
                 // moveVCursorStep(&dc.cursor, try matchDirSuffix(cmd2),  &vp, txt_old);
                 // update selection
                 dc.cursor.selection.head = dc.cursor.pos;
+            } else if (genericMatch(cmd2, &paste_sel)) {
+                try dc.pasteSelection();
+            } else if (genericMatch(cmd2, &undo)) {
+                dc.undo();
             }
-            print("\nAfter handling commands: dc.vp: {}\n", .{ dc.render_buffer.viewport});
-            print("Cursor: {}\n\n", .{dc.cursor});
+            else if (mode == .normal and genericMatch(cmd2, &insert_mode)) {
+                mode = .insert;
+            } else if (mode == .insert and genericMatch(cmd2, &normal_mode)) {
+                mode = .normal;
+            } else if (mode == .insert) {
+                try dc.insertAtCursor(cmd2);
+            }
+
+            {
+                const zone_print = tracy.initZone(@src(), .{ .name = "print" });
+                defer zone_print.deinit();
+                print("\nAfter handling commands: dc.vp: {}\n", .{ dc.render_buffer.viewport});
+                print("Cursor: {}\n\n", .{dc.cursor});
+            }
             //try dc.render_buffer.resize(vp);
-            const txt = try dc.getText();
+            const txt = b: {
+                const zone_txt = tracy.initZone(@src(), .{ .name = "Getting text" });
+                defer zone_txt.deinit();
+                break :b try dc.getText();
+            };
             //try render(&.{}, dc.cursor, txt, vp);
-            try render(cmd, dc.cursor, txt, dc.render_buffer.viewport);
+            {
+                const zone_rndr = tracy.initZone(@src(), .{ .name = "Rendering" });
+                defer zone_rndr.deinit();
+                try render(cmd, dc.cursor, txt, dc.render_buffer.viewport);
+
+            }
         }
     }
 }
@@ -281,12 +340,14 @@ fn render_bottom_ui(maybe_bytes: ?[]const u8, arg_writer: anytype, cursor: Curso
         // input given
         // raw input row
         try moveCursor(writer, size.height - 2, 0);
+        try writer.print("\x1B[46m", .{});
         try writer.writeAll("Raw input:       ");
         try parse_utils.rawWrite(bytes, writer);
         // parsed input row
         try moveCursor(writer, size.height - 1, 0);
         try writer.writeAll("Parsed input:    ");
         try parse_utils.parseWrite(bytes, writer);
+        try writer.print("\x1B[49m", .{});
     } else {
         // no input
         try moveCursor(writer, size.height - 2, 0);
@@ -294,9 +355,14 @@ fn render_bottom_ui(maybe_bytes: ?[]const u8, arg_writer: anytype, cursor: Curso
     }
     // status row
     try moveCursor(writer, size.height - 3, 0);
-    try writer.print("selection anchor {any: >3}   head {any: >3}", .{ cursor.selection.anchor, cursor.selection.head });
+    try writer.print("\x1B[45m", .{});
+    try writer.print("MODE: {s:>6}", .{@tagName(mode)});
+    try writer.print("\x1B[47m", .{});
+    try writer.print(" selection anchor {any: >3}   head {any: >3}", .{
+        cursor.selection.anchor, cursor.selection.head });
     try moveCursor(writer, size.height - 4, 0);
     try writer.print("view {any: >3}   cursor {any: >3} (move using CTRL+<arrow>)", .{ view, cursor.pos });
+    try writer.print("\x1B[49m", .{});
 }
 
 fn render_sel(writer: anytype, cursor: Cursor, view: doc.ViewPort, lns: []const doc.LineSlice) !void {
@@ -333,6 +399,7 @@ fn render_cursor(writer: anytype, cursor: Cursor, view: doc.ViewPort, lns: []con
     const col = cursor.pos.col;
     // if cursor.pos
     if (view.start.row <= row and row < view.start.row+view.height) {
+        if (row-view.start.row >= lns.len) return;
         try moveCursor(writer, row - view.start.row, col);
         // // white bg
         // try writer.writeAll("\x1B[47m");
@@ -344,7 +411,6 @@ fn render_cursor(writer: anytype, cursor: Cursor, view: doc.ViewPort, lns: []con
 
         // TODO fix so it works without the condition:
         std.debug.assert(view.start.col == 0);
-        if (row-view.start.row >= lns.len) return;
         const line = lns[row-view.start.row].line;
         //if (col >= line.len)
         var byte = if (col < line.len) line[col] else 0;

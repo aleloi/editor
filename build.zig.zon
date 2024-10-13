@@ -30,6 +30,10 @@
         //     .url = "https://github.com/Aandreba/zigrc/archive/refs/tags/0.4.0.tar.gz",
         //     .hash = "122081ba85104ea10d0fd80ef7f78ff72a0f2bb07351fde7fb0f97afcd63e78d7f01",
         // },
+        .tracy = .{
+            .url = "https://github.com/aleloi/zig-tracy-v0-11-2/archive/160edfc14abc6ecb7ef8f1cb0b306c2f470d8027.tar.gz",
+            .hash = "1220909d1df7c7990c106671374f53e96c0225283567f7e9e0729a5bd907b7965f7b"
+        },
     },
     .paths = .{
         "build.zig",

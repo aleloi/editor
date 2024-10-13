@@ -22,11 +22,11 @@ pub const Pos = struct {
 
     /// Less than or equal, self <= other, this pos is before or at
     /// other pos.
-    fn lexLe(self: @This(), other: @This()) bool {
+    pub fn lexLe(self: @This(), other: @This()) bool {
         return self.row < other.row or (self.row == other.row and self.col <= other.col);
     }
 
-    fn lexLt(self: @This(), other: @This()) bool {
+    pub fn lexLt(self: @This(), other: @This()) bool {
         return self.row < other.row or (self.row == other.row and self.col < other.col);
     }
 };
@@ -49,7 +49,7 @@ pub const Node = NodeBF(16, gpa_alloc);
 
 /// Every tree node contains aggregate stats for all bytes in its
 /// descendents.
-const AggregateStats = struct {
+pub const AggregateStats = struct {
     num_newlines: usize,
     num_bytes: usize,
     last_newline_pos: ?usize,
@@ -885,7 +885,7 @@ pub fn NodeBF(branch_factor: comptime_int,
 
         /// 1 plus the number of newline characters. Not sure if that's the right thing?
         pub fn numRows(self: @This()) usize {
-            return self.agg.num_newlines + 1;
+            return self.agg.num_newlines ;
         }
 
         // /// document...

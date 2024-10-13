@@ -1,3 +1,4 @@
+const tracy = @import("tracy");
 const std = @import("std");
 const rope = @import("rope");
 const rb = @import("render_buffer.zig");
@@ -11,6 +12,23 @@ pub const ViewPort = rb.ViewPort;
 
 pub const LineSlice = RenderBuffer.LineSlice;
 
+
+/// Standard ownership semantics: caller is responsile for releasing
+/// `to_insert` and `tree`.
+fn insertAtOffset(tree: RopeRc, to_insert: RopeRc, offset: usize) !RopeRc {
+    const splt = try Rope.splitAt(tree, offset);
+
+    const before: RopeRc = splt.fst;
+    const after: RopeRc = splt.snd;
+    defer before.releaseWithFn(Rope.deinit);
+    defer after.releaseWithFn(Rope.deinit);
+
+    const before_and_insert: RopeRc = try Rope.concat(before, to_insert);
+    defer before_and_insert.releaseWithFn(Rope.deinit);
+
+    return try Rope.concat(before_and_insert, after);
+}
+
 /// movable head, immovable anchor.
 /// regular cursor/empty selection: head = anchor
 /// Idea: have a nullable selection instead of empty selection?
@@ -23,6 +41,7 @@ pub const Selection = struct {
     }
 };
 
+/// TODO document
 pub const Direction = enum {
     up,
     down,
@@ -49,6 +68,8 @@ pub const Cursor = struct {
 
     /// TODO: feedback when the cursor reaches the top / bottom?
     pub fn move(self: *@This(), rp_rc: RopeRc, dir: Direction) void {
+        const zone = tracy.initZone(@src(), .{ .name = "Move cursor" });
+        defer zone.deinit();
         const rp: Rope = rp_rc.value.*;
         const num_rows: usize = rp.numRows();
 
@@ -93,6 +114,18 @@ pub const Cursor = struct {
 
         self.pos = .{.row = n_row, .col = n_col};
         self.target_col = n_target_col;
+    }
+
+    /// Where does the cursor end up if we paste something with info
+    /// `agg` at its position, and then move the cursor past the
+    /// inserted text?
+    pub fn forwardByAgg(self: *@This(), agg: rope.AggregateStats) void {
+        self.pos.row += agg.num_newlines;
+        if (agg.num_newlines == 0) {
+            self.pos.col += agg.num_bytes;
+        } else {
+            self.pos.col = agg.num_bytes - agg.last_newline_pos.?;
+        }
     }
 
     // fn up(self: @This()) Cursor {
@@ -141,13 +174,19 @@ pub const Document = struct {
 
         // Currently only extracting whole lines.
         const start_pos = Pos {.row = vp.start.row, .col=0};
-        const start_offset = curr_whole.value.*.posToOffset(start_pos) catch return &.{};
+        const start_offset: usize = b: {
+            const zone = tracy.initZone(@src(), .{ .name = "start offset" });
+            defer zone.deinit();
+            break :b curr_whole.value.*.posToOffset(start_pos) catch return &.{};
+        };
 
         const end_pos = Pos {.row = start_pos.row + vp.height, .col=0};
         // Will break, TODO patch the Rope to just give me everything.
         const end_offset = curr_whole.value.*.posToOffset(end_pos) catch curr_whole.value.*.agg.num_bytes;
 
         const start_onwards: RopeRc = b: {
+            const zone = tracy.initZone(@src(), .{ .name = "Split tree 1" });
+            defer zone.deinit();
             var split = try Rope.splitAt(curr_whole, start_offset);
             split.fst.releaseWithFn(Rope.deinit);
             break :b split.snd;
@@ -155,6 +194,8 @@ pub const Document = struct {
         defer start_onwards.releaseWithFn(Rope.deinit);
 
         const visible_piece = bb: {
+            const zone = tracy.initZone(@src(), .{ .name = "Split tree 2" });
+            defer zone.deinit();
             var split = try Rope.splitAt(start_onwards, end_offset - start_offset);
             split.snd.releaseWithFn(Rope.deinit);
             break :bb split.fst;
@@ -163,19 +204,30 @@ pub const Document = struct {
 
         // UNSAFE (and inefficient), just for testing, TODO fix!
         var huge_buf: [1_000_000] u8 = undefined;
-        var iter = visible_piece.value.*.allBytesIterator();
         var i: usize = 0;
-        while (iter.next()) |c| {
-            huge_buf[i] = c;
-            i += 1;
+
+        {
+            const zone = tracy.initZone(@src(), .{ .name = "Tree read chars" });
+            defer zone.deinit();
+            var iter = visible_piece.value.*.allBytesIterator();
+            while (iter.next()) |c| {
+                huge_buf[i] = c;
+                i += 1;
+            }
         }
-        return self.render_buffer.fillFromText(huge_buf[0..i]);
+
+        return b: {
+            const zone = tracy.initZone(@src(), .{ .name = "Filling render buffer" });
+            defer zone.deinit();
+            break :b self.render_buffer.fillFromText(huge_buf[0..i]);
+        };
+
     }
 
     // /// How many lines does the current version of the doc have?
     pub fn numRows(self: @This()) usize {
         std.debug.assert(self.history.items.len > 0);
-        return self.history.items[0].value.*.numLines();
+        return self.history.getLast().value.*.numLines();
         // const v_agg: rope.AggregateStats = self.history.items[0].value.*;
         // return v.agg.num_newlines + 1;
     }
@@ -188,18 +240,91 @@ pub const Document = struct {
 
     /// Too many layers? Also it makes sense to have this in Cursor
     pub fn moveCursor(self: *@This(), dir: Direction) void {
-        self.cursor.move(self.history.items[0], dir);
+        self.cursor.move(self.history.getLast(), dir);
     }
 
+    /// todo document
     pub fn moveView(self: *@This(), dy: isize) void {
         const vp: *ViewPort = &self.render_buffer.viewport;
-        const num_rows = self.*.history.items[0].value.*.numRows();
+        const num_rows = self.history.getLast().value.*.numRows();
         const curr_row: * usize = &vp.*.start.row;
         if (dy > 0) {
             // Max viewpoint start is doc size + num visible rows:
             curr_row.* = @min(curr_row.* + @abs(dy), num_rows + vp.*.height);
         } else if (dy < 0) {
             curr_row.* -= @min(@abs(dy), curr_row.*);
+        }
+    }
+
+    /// Insert `text` at current cursor position, set cursor after it
+    /// and (todo implement?) set viewport so that cursor is visible.
+    /// TODO make a thing that inserts a TREE (useful for pasting),
+    /// and call it from here.
+    pub fn insertAtCursor(self: *@This(), text: []const u8) !void {
+        const pos: Pos = self.cursor.pos;
+        const last: RopeRc = self.history.getLast();
+
+        const to_insert: RopeRc = try Rope.fromSlice(text);
+        defer to_insert.releaseWithFn(Rope.deinit);
+
+        const res = try insertAtOffset(
+            last, to_insert,
+            last.value.*.posToOffset(pos) catch last.value.*.agg.num_bytes);
+        errdefer res.releaseWithFn(Rope.deinit);
+
+        try self.history.append(res);
+        self.cursor.forwardByAgg(to_insert.value.*.agg);
+    }
+
+
+
+
+    pub fn pasteSelection(self: *@This()) !void {
+        const last: RopeRc = self.history.getLast();
+        //const pos_offset = last.value.*.posToOffset(self.cursor.pos) catch last.value.*.agg.num_bytes;
+
+
+        const begin, const end = b: {
+            const a: Pos = self.cursor.selection.head;
+            const b: Pos = self.cursor.selection.anchor;
+            const bp = if (a.lexLe(b)) a else b;
+            const ep = if (a.lexLe(b)) b else a;
+
+            break :b .{
+                last.value.*.posToOffset(bp) catch last.value.*.agg.num_bytes,
+                last.value.*.posToOffset(ep) catch last.value.*.agg.num_bytes
+            };
+        };
+
+        std.debug.print("PASTE SELECTION; Begin: {}, end: {}\n", .{begin, end});
+
+        const begin_onwards: RopeRc = b: {
+            const splt = try Rope.splitAt(last, begin);
+            splt.fst.releaseWithFn(Rope.deinit);
+            break :b splt.snd;
+        };
+        defer begin_onwards.releaseWithFn(Rope.deinit);
+
+        const begin_to_end: RopeRc = b: {
+            const splt = try Rope.splitAt(begin_onwards, end - begin);
+            splt.snd.releaseWithFn(Rope.deinit);
+            break :b splt.fst;
+        };
+        std.debug.print("begin-to-end agg {any}\n", .{begin_to_end.value.*.agg});
+        defer begin_to_end.releaseWithFn(Rope.deinit);
+
+        const res = try insertAtOffset(
+            last, begin_to_end,
+            last.value.*.posToOffset(self.cursor.pos) catch last.value.*.agg.num_bytes);
+        errdefer res.releaseWithFn(Rope.deinit);
+
+        try self.history.append(res);
+        self.cursor.forwardByAgg(begin_to_end.value.*.agg);
+    }
+
+    pub fn undo(self: *@This()) void {
+        if (self.history.items.len > 1) {
+            _ = self.history.pop();
         }
     }
 };
@@ -215,6 +340,8 @@ pub fn openAsRope(alloc: std.mem.Allocator, rel_fname: [] const u8) !RopeRc {
 
     const fl: std.fs.File = try dir.openFile(rel_fname, .{});
     defer fl.close();
+
+    //fl.writer();
 
     const buf: []const u8 = try fl.readToEndAlloc(alloc, 20_000_000);
     defer alloc.free(buf);

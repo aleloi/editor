@@ -45,7 +45,7 @@ def get_text() -> list[bytes]:
     global LINES
 
     view_first_pos = min(rope.Pos(row=VIEW_FIRST_LINE, col=0), ROPE.end_pos())
-    print(f"SPLIT at view first pos which is {view_first_pos}")
+    print(f"SPLIT at view first pos which is {view_first_pos}", file=sys.stderr)
     _, view_onwards = ROPE.split_at_pos(view_first_pos)
     view_end_pos = min(view_onwards.end_pos(), rope.Pos(row=N_LINES, col=0))
     view, _ = view_onwards.split_at_pos(view_end_pos)
