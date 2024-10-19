@@ -11,7 +11,7 @@ pub const RenderBuffer = rb.RenderBuffer;
 pub const ViewPort = rb.ViewPort;
 
 pub const LineSlice = RenderBuffer.LineSlice;
-
+const logger = @import("mini.zig").logger;
 
 /// Standard ownership semantics: caller is responsile for releasing
 /// `to_insert` and `tree`.
@@ -128,6 +128,14 @@ pub const Cursor = struct {
         } else {
             self.pos.col = agg.num_bytes - agg.last_newline_pos.?;
         }
+    }
+
+    fn movePosToEndOfLine(self: *@This(), rp_rc: RopeRc) void {
+        // TODO what to do when it's outside the viewport??? Should
+        // move viewport right, but we don't have any code to move in back
+        self.pos.col = rp_rc.value.*.rowLength(self.pos.row) catch unreachable;
+
+
     }
 
     // fn up(self: @This()) Cursor {
@@ -330,12 +338,48 @@ pub const Document = struct {
         }
     }
 
-    pub fn cursorPgUp(_: *@This()) void{}
-    pub fn cursorPgDn(_: *@This()) void{}
-    pub fn cursorHome(self: *@This()) void{
+    pub fn cursorPgUp(self: *@This()) void{
+        const rows_down = @max(self.render_buffer.viewport.height, 1)-1;
+        if (self.cursor.pos.row > rows_down) {
+            self.cursor.pos.row -= rows_down;
+        } else {
+            if (self.cursor.pos.row == 0) self.cursor.target_col = 0;
+            self.cursor.pos.row=0;
+        }
+
+        // make sure the cursor is visible after being moved
+        const crow = self.cursor.pos.row;
+        const vp: *ViewPort = &self.render_buffer.viewport;
+        if (crow < vp.*.start.row) vp.*.start.row = crow;
+        if (crow >= vp.*.start.row+vp.*.height) vp.*.start.row = crow-vp.*.height+1;
+    }
+    pub fn cursorPgDn(self: *@This()) void {
+        //logger.debug("PgDn!", .{ crow, main.view.lst });
+        const num_rows = self.history.getLast().value.*.numRows();
+        const rows_up = @max(self.render_buffer.viewport.height, 1)-1;
+        if (self.cursor.pos.row + rows_up < num_rows) {
+            self.cursor.pos.row += rows_up;
+        } else {
+            //if (self.cursor.pos.row == num_rows-1) self.cursor.target_col = 0;
+            // TODO what about col? doesn't the cursor scroll past the end?
+            self.cursor.pos.row=num_rows-1;
+        }
+
+        const crow = self.cursor.pos.row;
+        const vp: *ViewPort = &self.render_buffer.viewport;
+        // code dup
+        if (crow < vp.*.start.row) vp.*.start.row = crow;
+        if (crow >= vp.*.start.row+vp.*.height) vp.*.start.row = crow - vp.*.height+1;
+    }
+
+    pub fn cursorHome(self: *@This()) void {
         self.cursor.pos.col = self.render_buffer.viewport.start.col;
     }
-    pub fn cursorEnd(_: *@This()) void{}
+    pub fn cursorEnd(self: *@This()) void {
+        // TODO move viewport? Also, why member function?
+        self.cursor.movePosToEndOfLine(self.history.getLast());
+
+    }
 };
 
 

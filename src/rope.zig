@@ -59,6 +59,8 @@ const gpa_alloc = gpa.allocator();
 /// `node.releaseWithFn(Node.deinit)`.
 pub const Node = NodeBF(16, gpa_alloc);
 
+var do_debug_checks_during_rope_ops = false;
+
 /// Every tree node contains aggregate stats for all bytes in its
 /// descendents.
 pub const AggregateStats = struct {
@@ -764,9 +766,11 @@ pub fn NodeBF(branch_factor: comptime_int,
 
             const merged = try Self.merge(left.value.*, rightDownLeft.top().value.*);
             defer merged.releaseWithFn(Self.deinit);
-            debugCheck(rightDownLeft.top().value, rightDownLeft.top().value.*.height());
-            debugCheck(left.value, left.value.*.height());
-            debugCheck(merged.value, merged.value.*.height());
+            if (do_debug_checks_during_rope_ops) {
+                debugCheck(rightDownLeft.top().value, rightDownLeft.top().value.*.height());
+                debugCheck(left.value, left.value.*.height());
+                debugCheck(merged.value, merged.value.*.height());
+            }
 
             rightDownLeft.pop();
 
