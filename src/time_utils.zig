@@ -22,6 +22,14 @@ pub fn getTuple(secs: u64) struct { u16, u4, u5, u5, u6, u6 } {
     return .{ year, month, day, hours, minutes, seconds };
 }
 
+/// \nYYYY-MM-DD hh:mm:ss, in UTC
+pub fn writeTimestampNewline(secs: u64, writer: anytype) !void {
+    try writer.print(
+        "\n{any:0>4}-{any:0>2}-{any:0>2} {any:0>2}:{any:0>2}:{any:0>2}",
+        getTuple(secs),
+    );
+}
+
 /// YYYY-MM-DD hh:mm:ss, in UTC
 pub fn writeTimestamp(secs: u64, writer: anytype) !void {
     try writer.print(
