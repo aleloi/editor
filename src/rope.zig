@@ -29,6 +29,18 @@ pub const Pos = struct {
     pub fn lexLt(self: @This(), other: @This()) bool {
         return self.row < other.row or (self.row == other.row and self.col < other.col);
     }
+
+    pub fn format(
+        self: *const @This(),
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt;
+        _ = options;
+
+        try writer.print("( {d: >4}, {d: >4} )", .{ self.row, self.col });
+    }
 };
 
 fn panicAndExit(info: []const u8, extra: anytype) noreturn {

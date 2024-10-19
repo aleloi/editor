@@ -115,15 +115,21 @@ pub const InputSeqIterator = struct {
     pub fn next(self: *@This()) !?[]const u8 {
         // if no bytes, finished iterating
         if (self.bytes.len == 0) return null;
+        var max: u8 = 0;
+        for (self.bytes) |byte| max = @max(max, byte);
+        if (max > 127) {
+            print("\nnon-ascii nonsense ignored {any}\n", .{self.bytes});
+            return null;
+        }
         var ret: []const u8 = undefined;
-        // if 1 bytes, return after updating bytes
-        if (self.bytes.len == 1) {
-            ret = self.bytes;
+        if (self.bytes.len == 1 or self.bytes[0] != '\x1B') {
+            // single byte, or not an escape seqeuence
+            ret = self.bytes[0..1];
             self.bytes = self.bytes[1..];
             // print("\nyield 1 byte {any}\n", .{ret});
             return ret;
+            // panic("expected bytes {any} to start with 33\n", .{self.bytes});
         }
-        if (self.bytes[0] != '\x1B') panic("expected bytes {any} to start with 33\n", .{self.bytes});
         if (self.bytes.len == 2) {
             ret = self.bytes;
             self.bytes = self.bytes[2..];

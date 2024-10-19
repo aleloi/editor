@@ -66,6 +66,8 @@ pub const Cursor = struct {
 
     // fn posInsideView ?
 
+    //pub fn moveToBeginningOfLine()
+
     /// TODO: feedback when the cursor reaches the top / bottom?
     pub fn move(self: *@This(), rp_rc: RopeRc, dir: Direction) void {
         const zone = tracy.initZone(@src(), .{ .name = "Move cursor" });
@@ -327,6 +329,13 @@ pub const Document = struct {
             _ = self.history.pop();
         }
     }
+
+    pub fn cursorPgUp(_: *@This()) void{}
+    pub fn cursorPgDn(_: *@This()) void{}
+    pub fn cursorHome(self: *@This()) void{
+        self.cursor.pos.col = self.render_buffer.viewport.start.col;
+    }
+    pub fn cursorEnd(_: *@This()) void{}
 };
 
 

@@ -8,11 +8,6 @@ const posix = std.posix;
 const print = std.debug.print;
 const panic = std.debug.panic;
 
-const format = @import("format.zig");
-const term_utils = @import("term_utils.zig");
-const parse_utils = @import("parse_utils.zig");
-const write_utils = @import("write_utils.zig");
-
 const doc = @import("document.zig");
 const Cursor = doc.Cursor;
 const Selection = doc.Selection;
@@ -21,20 +16,23 @@ const Direction = doc.Direction;
 
 const tracy = @import("tracy");
 
-var document: doc.Document = undefined;
+const format = @import("format.zig");
+const term_utils = @import("term_utils.zig");
+const parse_utils = @import("parse_utils.zig");
+const write_utils = @import("write_utils.zig");
+const misc_utils = @import("misc_utils.zig");
+const selection_utils = @import("selection_utils.zig");
+const logging = @import("logging.zig");
+
+pub const std_options = logging.std_options;
 
 
-//var file_content: [5 * 1024 * 1024]u8 = undefined;
-//var bytes_read: usize = 0;
-//const lines_read: usize = 100;
-//var lines: [5 * 1024 * 1024][]const u8 = undefined;
 /// index of first visible line
 // var first_line: usize = 0;
 const bottom_ui_rows: usize = 4;
 /// rows reserved for permanent ui
 const non_content_rows = bottom_ui_rows;
-/// rows available for file content
-var content_rows: usize = undefined;
+const non_content_cols: usize = 5;  // TODO!
 
 /// window dimensions
 var size: Size = undefined;
@@ -51,7 +49,7 @@ fn get_writer(buf: []u8) std.io.GenericWriter {
     return fbs.writer();
 }
 
-var parse_buf: [1000]u8 = .{128} ** 1000;
+var parse_buf: [1000]u8 = undefined;
 var parse_fbs = std.io.fixedBufferStream(&parse_buf);
 const parse_writer = parse_fbs.writer();
 
@@ -65,22 +63,6 @@ fn genericMatch(needle: []const u8, haystack: []const []const u8) bool {
         }
     }
     return false;
-}
-
-// /// All insertable chars
-// fn justInsertableCharacters(chars: []const u8) bool {
-
-// }
-
-/// tries to match a direction to the end of slice str
-fn matchDirSuffix(str: []const u8) !Direction {
-    for (arrows, dirs) |arrow, dir| {
-        // print("'{s}' '{s}'\n", .{ str[(str.len - arrow.len)..], arrow });
-        if (std.mem.eql(u8, str[(str.len - arrow.len)..], arrow)) {
-            return dir;
-        }
-    }
-    return error.Error;
 }
 
 /// return return the pair sorted by row, col
@@ -103,21 +85,6 @@ fn isBetween(A: Point, B: Point, C: Point) bool {
     return ((!cmpPoints(B, A)) and cmpPoints(B, C));
 }
 
-// const Direction = enum {
-//     up,
-//     down,
-//     left,
-//     right,
-//     fn pt(self: Direction) struct { isize, isize } {
-//         switch (self) {
-//             Direction.up => return .{ -1, 0 },
-//             Direction.down => return .{ 1, 0 },
-//             Direction.left => return .{ 0, -1 },
-//             Direction.right => return .{ 0, 1 },
-//         }
-//     }
-// };
-
 /// quit commands
 const q_eq: [3][]const u8 = .{ "ESC", "Q", "q" };
 /// down commands
@@ -125,12 +92,15 @@ const j_eq: [3][]const u8 = .{ "DOWN", "J", "j" };
 /// up commands
 const k_eq: [3][]const u8 = .{ "UP", "K", "k" };
 
-const dirs: [4]Direction = .{ Direction.up, Direction.down, Direction.left, Direction.right };
-const arrows: [4][]const u8 = .{ "UP", "DOWN", "LEFT", "RIGHT" };
-/// cursor up
+pub const arrows: [4][]const u8 = .{ "UP", "DOWN", "LEFT", "RIGHT" };
+/// move cursor
 const c_arrows: [4][]const u8 = .{ "CTRL+UP", "CTRL+DOWN", "CTRL+LEFT", "CTRL+RIGHT" };
 /// change selection
 const sc_arrows: [4][]const u8 = .{ "SHIFT+CTRL+UP", "SHIFT+CTRL+DOWN", "SHIFT+CTRL+LEFT", "SHIFT+CTRL+RIGHT" };
+/// move cursor fn+arrow
+const c_fn_arrows: [4][]const u8 = .{ "CTRL+PGUP", "CTRL+PGDN", "CTRL+HOME", "CTRL+END" };
+/// change selection fn+arrow
+const sc_fn_arrows: [4][]const u8 = .{ "SHIFT+CTRL+PGUP", "SHIFT+CTRL+PGDN", "SHIFT+CTRL+HOME", "SHIFT+CTRL+END" };
 
 const paste_sel: [1][]const u8 = .{ "CTRL+y" };
 
@@ -154,7 +124,9 @@ pub fn main() !void {
     try term_utils.uncook(tty);
     defer term_utils.cook(tty) catch {};
 
-    //try getInp();
+    try logging.logger_init(null);
+    defer logging.logger_deinit();
+
 
     size = try getSize();
 
@@ -180,7 +152,7 @@ pub fn main() !void {
 
     defer rope.releaseWithFn(@TypeOf(rope.value.*).deinit);
     //const vp = doc.ViewPort {.height = size.height-2, .width=size.width-1};
-    var dc = try doc.Document.init(alloc, size.height-2, size.width-1, rope);
+    var dc = try doc.Document.init(alloc, size.height-non_content_rows, size.width-4, rope);
 
     {
         const txt = try dc.getText();
@@ -188,7 +160,6 @@ pub fn main() !void {
     }
 
     while (true) {
-        //print("\nvp: {}, dc.vp: {}\n\n", .{vp, dc.render_buffer.viewport});
         // var buffer: [1]u8 = undefined;
         // _ = try tty.read(&buffer);
 
@@ -221,37 +192,54 @@ pub fn main() !void {
                 return;
             } else if (genericMatch(cmd2, &j_eq)) {
                 // next line
-                // if (lines_read + 20 > size.height and first_line < lines_read - 20) {
-                //     first_line += 1;
-                // }
                 dc.moveView(1);
-                //vp = moveView(1, vp);
             } else if (genericMatch(cmd2, &k_eq)) {
                 // previous line
-                // if (first_line > 0) {
-                //     first_line -= 1;
-                // }
                 dc.moveView(-1);
-                // vp = moveView(-1, vp);
             } else if (genericMatch(cmd2, &c_arrows)) {
                 // ctrl+arrow, move cursor
                 //  move cursor
-                //dc.cursor.move()
-                dc.moveCursor(try matchDirSuffix(cmd2));
-                // moveVCursorStep(&dc.cursor, try matchDirSuffix(cmd2),  &vp, txt_old);
+                dc.moveCursor(try selection_utils.matchDirSuffix(cmd2));
                 // reset selection
                 dc.cursor.selection = Selection.emptySel(dc.cursor.pos);
             } else if (genericMatch(cmd2, &sc_arrows)) {
                 // shift+ctrl+arrow, move cursor & selection
                 // move cursor
-                dc.moveCursor(try matchDirSuffix(cmd2));
-                // moveVCursorStep(&dc.cursor, try matchDirSuffix(cmd2),  &vp, txt_old);
+                dc.moveCursor(try selection_utils.matchDirSuffix(cmd2));
                 // update selection
                 dc.cursor.selection.head = dc.cursor.pos;
             } else if (genericMatch(cmd2, &paste_sel)) {
                 try dc.pasteSelection();
             } else if (genericMatch(cmd2, &undo)) {
                 dc.undo();
+            } else if (genericMatch(cmd2, &c_fn_arrows)) {
+                // ctrl+arrow, move cursor
+                // move cursor
+                const Case = enum { PGUP, PGDN, HOME, END };
+                const case = std.meta.stringToEnum(Case, cmd2[5..]);
+                if (case) |case_| {
+                    switch (case_) {
+                        .PGUP => dc.cursorPgUp(),
+                        .PGDN => dc.cursorPgDn(),
+                        .HOME => dc.cursorHome(),
+                        .END => dc.cursorEnd(),
+                    }
+                }
+            } else if (genericMatch(cmd2, &sc_fn_arrows)) {
+                // shift+ctrl+arrow, move cursor & selection
+                // move cursor
+                const Case = enum { PGUP, PGDN, HOME, END };
+                const case = std.meta.stringToEnum(Case, cmd2[11..]);
+                if (case) |case_| {
+                    switch (case_) {
+                        .PGUP => dc.cursorPgUp(),
+                        .PGDN => dc.cursorPgDn(),
+                        .HOME => dc.cursorHome(),
+                        .END => dc.cursorEnd(),
+                    }
+                    // update selection (TODO)!
+                    dc.cursor.selection.head = dc.cursor.pos;
+                }
             }
             else if (mode == .normal and genericMatch(cmd2, &insert_mode)) {
                 mode = .insert;
@@ -278,26 +266,10 @@ pub fn main() !void {
                 const zone_rndr = tracy.initZone(@src(), .{ .name = "Rendering" });
                 defer zone_rndr.deinit();
                 try render(cmd, dc.cursor, txt, dc.render_buffer.viewport);
-
             }
         }
     }
 }
-
-// fn renderLines(writer: anytype, lns: []const doc.LineSlice, bottom_bytes: []const u8, cursor: Cursor) !void {
-//     // const tty_writer = tty.writer();
-//     // var buf_writer = std.io.bufferedWriter(tty_writer);
-//     // const writer = buf_writer.writer();
-
-//     //try clear(writer);
-
-//     for (lns, 0..) |line, i| {
-//         try writeLine(writer, line.line, i);
-//     }
-
-//     //try render_bottom_ui(bottom_bytes, writer, cursor);
-//     //try buf_writer.flush();
-// }
 
 /// render the current view
 fn render(maybe_bytes: ?[]const u8, cursor: Cursor, lns: [] const doc.LineSlice, view: doc.ViewPort) !void {
@@ -310,6 +282,7 @@ fn render(maybe_bytes: ?[]const u8, cursor: Cursor, lns: [] const doc.LineSlice,
     for (lns, 0..) |line, i| {
         try writeLine(writer, line.line, i);
     }
+    try render_line_numbers(writer, view);
 
     //try renderLines(writer);
     try render_sel(writer, cursor, view, lns);
@@ -318,6 +291,23 @@ fn render(maybe_bytes: ?[]const u8, cursor: Cursor, lns: [] const doc.LineSlice,
     _ = &maybe_bytes;
 
     try buf_writer.flush();
+}
+
+// render the line numbers
+fn render_line_numbers(writer: anytype, view: doc.ViewPort) !void {
+    const first_line = view.start.row;
+    const last_line = view.start.row+view.height;
+    //non_content_cols = 2 + misc_utils.numDigits(last_line); // TODO!!!
+    for (first_line..last_line) |line_ind| {
+        const pad_slice = misc_utils.spaces[0..(non_content_cols - misc_utils.numDigits(line_ind) - 1)];
+        try moveCursor(writer, line_ind - first_line, 0);
+        try writer.print("{s}{d}", .{ pad_slice, line_ind });
+    }
+    for (last_line..(view.start.row + view.height)) |line_ind| {
+        const pad_slice = misc_utils.spaces[0..(non_content_cols - 2)];
+        try moveCursor(writer, line_ind - first_line, 0);
+        try writer.print("{s}~", .{pad_slice});
+    }
 }
 
 // /// render file content
@@ -382,9 +372,11 @@ fn render_sel(writer: anytype, cursor: Cursor, view: doc.ViewPort, lns: []const 
         std.debug.assert(view.start.col==0);
         for (0..line.line.len, line.line) |col_i, ch| {
             if (isBetween(min_p, .{.row=row_i, .col=col_i}, max_p)) {
-                try moveCursor(writer, row_i - view.start.row, col_i);
+                try moveCursor(writer, row_i - view.start.row, col_i+non_content_cols);
                 // underline
                 try writer.writeAll("\x1B[4m");
+                // invert
+                try writer.writeAll("\x1B[7m");
                 var byte = ch;
                 if (byte < 32 or byte > 126) byte = ' ';
                 try writer.writeByte(byte);
@@ -400,7 +392,7 @@ fn render_cursor(writer: anytype, cursor: Cursor, view: doc.ViewPort, lns: []con
     // if cursor.pos
     if (view.start.row <= row and row < view.start.row+view.height) {
         if (row-view.start.row >= lns.len) return;
-        try moveCursor(writer, row - view.start.row, col);
+        try moveCursor(writer, row - view.start.row, col+non_content_cols);
         // // white bg
         // try writer.writeAll("\x1B[47m");
         // reverse fg/bg
@@ -422,7 +414,7 @@ fn render_cursor(writer: anytype, cursor: Cursor, view: doc.ViewPort, lns: []con
 
 /// write <txt> to the buffer at row y col 0, applying format.myFmtLine
 fn writeLine(writer: anytype, txt: []const u8, y: usize) !void {
-    try moveCursor(writer, y, 0);
+    try moveCursor(writer, y, non_content_cols);
     try writer.print("{}", .{format.myFmtLine(txt)});
 }
 
@@ -446,175 +438,12 @@ fn getSize() !Size {
     const height: usize = win_size.ws_row;
     // update number of rows available for content
     if (height < non_content_rows) unreachable;
-    content_rows = win_size.ws_row - non_content_rows;
+    //const content_rows = win_size.ws_row - non_content_rows;
     return Size{
         .height = win_size.ws_row,
         .width = win_size.ws_col,
     };
 }
-
-// /// read file content from stdin.
-// /// raise exception if longer than 5 MB.
-// fn getInp() !void {
-//     const stdin = std.io.getStdIn().reader();
-//     bytes_read = try stdin.readAll(&file_content);
-//     if (bytes_read == file_content.len) @panic("getInp file too long");
-//     var split_it = std.mem.splitSequence(u8, file_content[0..bytes_read], "\n");
-//     while (split_it.next()) |line| {
-//         lines[lines_read] = line;
-//         lines_read += 1;
-//     }
-// }
-// / first line, last line. lst not included
-// const View = struct {
-//     fst: usize = 0,
-//     lst: usize = 0,
-// };
-// var view: View = .{};
-// fn moveView(ind: isize, vp: doc.ViewPort) doc.ViewPort {
-//     var vpc = vp;
-//     //const lines_read: usize = 100;
-//     if (ind > 0) {
-//         vpc.start.row += @min(@abs(ind), lines_read - vpc.start.row - @min(10, lines_read));
-//     } else if (ind < 0) {
-//         // const abs: usize = ind;
-//         vpc.start.row -= @min(@abs(ind), vpc.start.row);
-//     }
-//     //view.start.row+view.height = @min(lines_read, view.start.row + content_rows);
-//     //if (view.start.row+view.height <= view.start.row or view.start.row+view.height > lines_read + 1) panic("moveView caused invalid view {any}\n", .{view});
-//     return vpc;
-// }
-
-// // 0-indexing
-// const Point = struct {
-//     row: usize,
-//     col: usize,
-// };
-// fn point(row: usize, col: usize) Point {
-//     return .{ .row = row, .col = col };
-// }
-
-// /// a point, and a selection
-// const Cursor = struct {
-//     pos: Point,
-//     target_col: usize = 0,
-//     selection: Selection = emptySel(point(1, 0)),
-// };
-// const def_pos = point(0, 0);
-// var cursor: Cursor = .{ .pos = def_pos, .selection = emptySel(def_pos) };
-
-// /// move the cursor single step in cardinal direction
-// fn moveVCursorStep(cursor: *Cursor, dir: Direction, view: *doc.ViewPort, lns: [] const doc.LineSlice) void {
-//     // TODO breaks when cursor is outside of viewport...
-//     std.debug.assert(view.*.start.col==0);
-//     std.debug.assert(view.*.start.row <= cursor.*.pos.row and cursor.*.pos.row < view.*.start.row + view.*.height);
-
-//     // current pos
-//     var crow = cursor.pos.row;
-//     var ccol = cursor.pos.col;
-
-//     const view_start_row = view.*.start.row;
-//     //
-//     const n_row = lines_read;
-
-//     switch (dir) {
-//         Direction.up => {
-//             if (crow < 1) {
-//                 ccol = 0;
-//             } else {
-//                 crow -= 1;
-//                 ccol = @min(lns[crow-view_start_row].line.len, cursor.target_col);
-//             }
-//         },
-//         Direction.down => {
-//             if (crow >= n_row - 1) {
-//                 ccol = lns[crow-view_start_row].line.len;
-//             } else {
-//                 crow += 1;
-//                 ccol = @min(lns[crow-view_start_row].line.len, cursor.target_col);
-//             }
-//         },
-//         Direction.left => {
-//             if (ccol < 1) {
-//                 if (crow > 0) {
-//                     crow -= 1;
-//                     ccol = lns[crow-view_start_row].line.len;
-//                 } else {}
-//             } else {
-//                 ccol -= 1;
-//             }
-//             cursor.target_col = ccol;
-//         },
-//         Direction.right => {
-//             if (ccol >= lns[crow-view_start_row].line.len) {
-//                 if (crow < n_row - 1) {
-//                     crow += 1;
-//                     ccol = 0;
-//                 } else {}
-//             } else {
-//                 ccol += 1;
-//             }
-//             cursor.target_col = ccol;
-//         },
-//     }
-//     // save changes
-//     cursor.pos = .{.row=crow, .col=ccol};
-
-//     // make sure the cursor is visible after being moved
-//     if (crow < view.start.row) view.* = moveView(-@as(isize, @intCast(view.start.row - crow)), view.*);
-//     if (crow >= view.start.row+view.height) view.* = moveView(@intCast(view.start.row+view.height + 1 - crow), view.*);
-// }
-
-// /// move the the cursor
-// fn moveVCursorRel(rows: isize, cols: isize, cursor: *Cursor, view: *doc.ViewPort, lns: []const doc.LineSlice) void {
-//     var crow = cursor.pos.row;
-//     var ccol = cursor.pos.col;
-//     const view_start_row = view.*.start.row;
-
-//     if (rows < 0) {
-//         crow -= @min(crow, @abs(rows));
-//     } else if (rows > 0) {
-//         crow += @min(lines_read - crow, @abs(rows));
-//     }
-//     const clen = lns[crow-view_start_row].len;
-//     if (cols == 0) {
-//         ccol = @min(clen, cursor.target_col);
-//     } else {
-//         if (cols > 0) {
-//             ccol += @min(clen - ccol, @abs(cols));
-//         } else if (cols < 0) {
-//             ccol -= @min(ccol, @abs(cols));
-//         }
-//         cursor.target_col = ccol;
-//     }
-//     // save changes
-//     cursor.pos = .{.row=crow, .colr=ccol};
-
-//     // make sure the cursor is visible after being moved
-//     if (crow < view.start.row) moveView(-@as(isize, @intCast(view.start.row - crow)));
-//     if (crow >= view.start.row+view.height) moveView(@intCast(view.start.row+view.height + 1 - crow));
-// }
-
-// /// try to move the cursor to target point
-// fn setVCursorPos(target: Point, cursor: *Cursor) void {
-//     var trow = target.row;
-//     var tcol = target.col;
-//     if (trow > lines_read) trow = lines_read;
-//     const tlen = lines[trow].len;
-//     if (tcol > tlen) tcol = tlen;
-//     cursor.pos = .{.row=trow, .col=tcol};
-//     cursor.target_col = tcol;
-// }
-
-// /// movable head, immovable anchor.
-// /// regular cursor/empty selection: head = anchor
-// const Selection = struct {
-//     head: Point,
-//     anchor: Point,
-// };
-// fn emptySel(pos: Point) Selection {
-//     return .{ .head = pos, .anchor = pos };
-// }
 
 // this seems to ensure all tests are run
 // when placed in the root file
