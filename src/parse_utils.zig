@@ -1,7 +1,11 @@
 //! parse_utils, parsing terminal input sequences
 const std = @import("std");
-const print = std.debug.print;
-const panic = std.debug.panic;
+const panicFmt = logging.panicFmt;
+
+const logging = @import("logging.zig");
+
+pub const std_options = logging.std_options;
+pub const logger = logging.default_logger;
 
 // the functions that match keycodes to keys
 const match_keycodes = @import("match_keycodes.zig");
@@ -118,7 +122,7 @@ pub const InputSeqIterator = struct {
         var max: u8 = 0;
         for (self.bytes) |byte| max = @max(max, byte);
         if (max > 127) {
-            print("\nnon-ascii nonsense ignored {any}\n", .{self.bytes});
+            logger.warn("non-ascii nonsense ignored {any}", .{self.bytes});
             return null;
         }
         var ret: []const u8 = undefined;
@@ -128,7 +132,7 @@ pub const InputSeqIterator = struct {
             self.bytes = self.bytes[1..];
             // print("\nyield 1 byte {any}\n", .{ret});
             return ret;
-            // panic("expected bytes {any} to start with 33\n", .{self.bytes});
+            // panicFmt("expected bytes {any} to start with 33", .{self.bytes});
         }
         if (self.bytes.len == 2) {
             ret = self.bytes;
@@ -156,9 +160,9 @@ pub const InputSeqIterator = struct {
                 }
                 index += 1;
             }
-            panic("CSI sequence {any} not terminated\n", .{self.bytes});
+            panicFmt("CSI sequence {any} not terminated", .{self.bytes});
         }
-        panic("3+ bytes {any} but not CSI or SS3\n", .{self.bytes});
+        panicFmt("3+ bytes {any} but not CSI or SS3", .{self.bytes});
     }
 };
 

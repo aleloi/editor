@@ -2,11 +2,14 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const expect = std.testing.expect;
-// const print = std.debug.print;
 
 const time_utils = @import("time_utils.zig");
 
 const mu = @import("misc_utils.zig");
+
+var log_buf: [5000]u8 = undefined;
+var log_fbs = std.io.fixedBufferStream(&log_buf);
+const log_fbw = log_fbs.writer();
 
 pub const std_options = .{
     // Set the log level to info
@@ -75,17 +78,24 @@ pub fn myLogFn(
     const scope_prefix = "";
     const prefix = " [" ++ comptime levelAsText(level) ++ "] " ++ scope_prefix;
     const new_format = prefix ++ format ++ "\n";
+    // write to fbs
+    log_fbs.reset();
+    time_utils.writeTimestamp(time_utils.now(), log_fbw) catch return;
+    log_fbw.print(new_format, args) catch return;
     // first print to file
-    blk: {
-        time_utils.writeTimestampNewline(time_utils.now(), file_writer orelse break :blk) catch break :blk;
-        (file_writer orelse break :blk).print(new_format, args) catch break :blk;
-    }
+    if (file_writer) |writer| writer.writeAll(log_fbs.getWritten()) catch {};
+
+    // blk: {
+    //     time_utils.writeTimestampNewline(time_utils.now(), file_writer orelse break :blk) catch break :blk;
+    //     (file_writer orelse break :blk).print(new_format, args) catch break :blk;
+    // }
     // Print the message to stderr, silently ignoring any errors
     std.debug.lockStdErr();
     defer std.debug.unlockStdErr();
     const stderr = std.io.getStdErr().writer();
-    time_utils.writeTimestampNewline(time_utils.now(), stderr) catch return;
-    stderr.print(new_format, args) catch return;
+    // time_utils.writeTimestampNewline(time_utils.now(), stderr) catch return;
+    // stderr.print(new_format, args) catch return;
+    stderr.writeAll(log_fbs.getWritten()) catch {};
 }
 
 pub fn main() void {

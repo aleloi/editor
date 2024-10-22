@@ -5,21 +5,15 @@ const mem = std.mem;
 const os = std.os;
 const linux = std.os.linux;
 const posix = std.posix;
-const print = std.debug.print;
-const panic = std.debug.panic;
+
 const write_utils = @import("write_utils.zig");
 const main = @import("mini.zig");
+const mu = @import("misc_utils.zig");
 
-const Point = main.Point;
-const point = main.point;
-
-const logger = main.logger;
-
-/// a point, and a selection
-pub const Cursor = struct {
-    pos: Point,
-    target_col: usize = 0,
-    selection: Selection = emptySel(point(1, 0)),
+// 0-indexing
+pub const Point = struct {
+    row: usize,
+    col: usize,
     pub fn format(
         self: *const @This(),
         comptime fmt: []const u8,
@@ -29,20 +23,106 @@ pub const Cursor = struct {
         _ = fmt;
         _ = options;
 
-        try writer.print("cursor ( {any}, t_col {d}, {any} )", .{ self.pos, self.target_col, self.selection });
+        try writer.print("({d: >3}, {d: >3})", .{ self.row, self.col });
+    }
+};
+pub fn point(row: usize, col: usize) Point {
+    return .{ .row = row, .col = col };
+}
+
+/// return return the pair sorted by row, col (min first)
+pub fn getSortedPoints(A: Point, B: Point) struct { Point, Point } {
+    if (B.row < A.row) return .{ B, A };
+    if (B.row == A.row and B.col < A.col) return .{ B, A };
+    return .{ A, B };
+}
+
+pub fn minPt(A: Point, B: Point) Point {
+    if (B.row < A.row) return B;
+    if (B.row == A.row and B.col < A.col) return B;
+    return A;
+}
+
+pub fn maxPt(A: Point, B: Point) Point {
+    if (B.row < A.row) return A;
+    if (B.row == A.row and B.col < A.col) return A;
+    return B;
+}
+
+/// strict cmp, bool (A < B)
+pub fn cmpPoints(A: Point, B: Point) bool {
+    if (B.row < A.row) return false;
+    if (B.row == A.row and B.col <= A.col) return false;
+    return true;
+}
+
+/// is A, B, C sorted?
+/// specifically: is A <= B < C
+pub fn isBetween(A: Point, B: Point, C: Point) bool {
+    return ((!cmpPoints(B, A)) and cmpPoints(B, C));
+}
+
+pub const logger = main.logger;
+pub const std_options = main.std_options;
+
+/// quit commands
+pub const q_eq: [3][]const u8 = .{ "ESC", "Q", "q" };
+/// down commands
+pub const j_eq: [3][]const u8 = .{ "DOWN", "J", "j" };
+/// up commands
+pub const k_eq: [3][]const u8 = .{ "UP", "K", "k" };
+
+/// move view
+pub const arrows: [4][]const u8 = .{ "UP", "DOWN", "LEFT", "RIGHT" };
+/// move cursor
+pub const c_arrows: [4][]const u8 = .{ "CTRL+UP", "CTRL+DOWN", "CTRL+LEFT", "CTRL+RIGHT" };
+/// change selection
+pub const sc_arrows: [4][]const u8 = .{ "SHIFT+CTRL+UP", "SHIFT+CTRL+DOWN", "SHIFT+CTRL+LEFT", "SHIFT+CTRL+RIGHT" };
+/// move view fn+arrow
+pub const fn_arrows: [4][]const u8 = .{ "PGUP", "PGDN", "HOME", "END" };
+/// move cursor fn+arrow
+pub const c_fn_arrows: [4][]const u8 = .{ "CTRL+PGUP", "CTRL+PGDN", "CTRL+HOME", "CTRL+END" };
+/// change selection fn+arrow
+pub const sc_fn_arrows: [4][]const u8 = .{ "SHIFT+CTRL+PGUP", "SHIFT+CTRL+PGDN", "SHIFT+CTRL+HOME", "SHIFT+CTRL+END" };
+
+/// a point, and a selection
+pub const Cursor = struct {
+    pos: Point,
+    t_col: usize = 0,
+    sel: Selection = emptySel(point(1, 0)),
+    pub fn format(
+        self: *const @This(),
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt;
+        _ = options;
+
+        try writer.print("cur ({any}, t_col {d}, {any})", .{ self.pos, self.t_col, self.sel });
     }
 };
 pub const def_pos = point(0, 0);
-pub var cursor: Cursor = .{ .pos = def_pos, .selection = emptySel(def_pos) };
+pub var cursor: Cursor = .{ .pos = def_pos, .sel = emptySel(def_pos) };
 
 /// tries to match a direction to the end of slice str
 pub fn matchDirSuffix(str: []const u8) !Direction {
-    for (main.arrows, dirs) |arrow, dir| {
+    logger.debug("matchDirSuffix {s}", .{str});
+    for (arrows, dirs) |arrow, dir| {
         // print("'{s}' '{s}'\n", .{ str[(str.len - arrow.len)..], arrow });
         if (std.mem.eql(u8, str[(str.len - arrow.len)..], arrow)) {
+            logger.debug("match {any}", .{dir});
             return dir;
         }
     }
+    for (fn_arrows, dirs) |arrow, dir| {
+        // print("'{s}' '{s}'\n", .{ str[(str.len - arrow.len)..], arrow });
+        if (std.mem.eql(u8, str[(str.len - arrow.len)..], arrow)) {
+            logger.debug("match {any}", .{dir});
+            return dir;
+        }
+    }
+    logger.warn("no match!", .{});
     return error.Error;
 }
 
@@ -61,31 +141,72 @@ pub const Direction = enum {
             Direction.right => return .{ 0, 1 },
         }
     }
+    pub fn format(
+        self: *const @This(),
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt;
+        _ = options;
+
+        try writer.writeAll(switch (self.*) {
+            Direction.up => "up",
+            Direction.down => "down",
+            Direction.left => "left",
+            Direction.right => "right",
+        });
+    }
 };
 
-/// move the cursor single step in cardinal direction
-pub fn moveVCursorStep(dir: Direction) void {
-    // current pos
-    var crow = cursor.pos.row;
-    var ccol = cursor.pos.col;
-    //
-    const n_row = main.lines_read;
+// /// unpack Point
+// pub fn ptUp(pt: Point) struct { usize, usize } {
+//     return .{ pt.row, pt.col };
+// }
 
+pub fn movePt(dir: Direction, move_sel: bool, fn_: bool, cursor_: *Cursor) void {
+    logger.debug("movePt(dir: {any}, move_sel: {any}, fn_: {any}, cursor_: {any})", .{ dir, move_sel, fn_, cursor_.* });
+    if (move_sel) {
+        const pt: Point = cursor_.sel.head;
+        cursor_.pos, cursor_.t_col = if (fn_) movePtFn(dir, pt, cursor_.t_col) else moveSingleStep(dir, pt, cursor_.t_col);
+        cursor_.sel.head = cursor_.pos;
+    } else {
+        const pt: Point = switch (dir) {
+            Direction.up, Direction.left => minPt(cursor_.sel.anchor, cursor_.sel.head),
+            Direction.down, Direction.right => maxPt(cursor_.sel.anchor, cursor_.sel.head),
+        };
+        const t_col = if (cursor_.sel.isEmpty()) cursor_.t_col else pt.col;
+        cursor_.pos, cursor_.t_col = if (fn_) movePtFn(dir, pt, t_col) else moveSingleStep(dir, pt, t_col);
+        cursor_.sel = emptySel(cursor_.pos);
+    }
+    logger.debug("movePt cursor {any}", .{cursor_.*});
+}
+
+/// dir, pt, target_col
+///
+/// return new {pt, tcol}
+pub fn moveSingleStep(dir: Direction, pt: Point, tc: usize) struct { Point, usize } {
+    var crow = pt.row;
+    var ccol = pt.col;
+    var tcol: usize = tc;
+    const n_rows = main.lines_read;
     switch (dir) {
         Direction.up => {
             if (crow < 1) {
+                crow = 0;
                 ccol = 0;
             } else {
                 crow -= 1;
-                ccol = @min(main.lines[crow].len, cursor.target_col);
+                ccol = @min(main.lines[crow].len, tc);
             }
         },
         Direction.down => {
-            if (crow >= n_row - 1) {
+            if (crow >= n_rows - 1) {
+                crow = n_rows - 1;
                 ccol = main.lines[crow].len;
             } else {
                 crow += 1;
-                ccol = @min(main.lines[crow].len, cursor.target_col);
+                ccol = @min(main.lines[crow].len, tc);
             }
         },
         Direction.left => {
@@ -93,116 +214,74 @@ pub fn moveVCursorStep(dir: Direction) void {
                 if (crow > 0) {
                     crow -= 1;
                     ccol = main.lines[crow].len;
-                } else {}
+                } else {
+                    ccol = 0;
+                }
             } else {
                 ccol -= 1;
             }
-            cursor.target_col = ccol;
+            tcol = ccol;
         },
         Direction.right => {
             if (ccol >= main.lines[crow].len) {
-                if (crow < n_row - 1) {
+                if (crow < n_rows - 1) {
                     crow += 1;
                     ccol = 0;
-                } else {}
+                } else {
+                    ccol = main.lines[crow].len;
+                }
             } else {
                 ccol += 1;
             }
-            cursor.target_col = ccol;
+            tcol = ccol;
         },
     }
-    // save changes
-    cursor.pos = point(crow, ccol);
 
-    // make sure the cursor is visible after being moved
-    if (crow < main.view.fst) main.moveView(-@as(isize, @intCast(main.view.fst - crow)));
-    logger.debug("moveView {} {}", .{ crow, main.view.lst });
+    // // if tcol unchanged, return null
+    // if (tcol == pt.col) tcol = null;
 
-    if (crow >= main.view.lst) main.moveView(@as(isize, @intCast(crow + 1 - main.view.lst)));
+    return .{ point(crow, ccol), tcol };
 }
 
-// /// move the the cursor
-// pub fn moveVCursorRel(rows: isize, cols: isize) void {
-//     var crow = cursor.pos.row;
-//     var ccol = cursor.pos.col;
-//     if (rows < 0) {
-//         crow -= @min(crow, @abs(rows));
-//     } else if (rows > 0) {
-//         crow += @min(main.lines_read - crow, @abs(rows));
-//     }
-//     const clen = main.lines[crow].len;
-//     if (cols == 0) {
-//         ccol = @min(clen, cursor.target_col);
-//     } else {
-//         if (cols > 0) {
-//             ccol += @min(clen - ccol, @abs(cols));
-//         } else if (cols < 0) {
-//             ccol -= @min(ccol, @abs(cols));
-//         }
-//         cursor.target_col = ccol;
-//     }
-//     // save changes
-//     cursor.pos = point(crow, ccol);
-
-//     // make sure the cursor is visible after being moved
-//     if (crow < main.view.fst) main.moveView(-@as(isize, @intCast(main.view.fst - crow)));
-//     if (crow >= main.view.lst) main.moveView(@intCast(main.view.lst + 1 - crow));
-// }
-
-/// try to move the cursor to target point
-pub fn setVCursorPos(target: Point) void {
-    var trow = target.row;
-    var tcol = target.col;
-    if (trow > main.lines_read) trow = main.lines_read;
-    const tlen = main.lines[trow].len;
-    if (tcol > tlen) tcol = tlen;
-    cursor.pos = point(trow, tcol);
-    cursor.target_col = tcol;
-}
-
-pub fn cursorHome() void {
-    logger.debug("cursorHome called!", .{});
-    cursor.pos = point(cursor.pos.row, 0);
-    cursor.target_col = 0;
-}
-
-pub fn cursorEnd() void {
-    logger.debug("cursorEnd called!", .{});
-    const crow = cursor.pos.row;
-    const clen = main.lines[crow].len;
-    cursor.pos = point(crow, clen);
-    cursor.target_col = clen;
-}
-
-pub fn cursorPgUp() void {
-    logger.debug("cursorPgUp called!", .{});
-    if (cursor.pos.row > main.content_rows - 1) {
-        cursor.pos.row -= (main.content_rows - 1);
-    } else {
-        if (cursor.pos.row == 0) cursor.target_col = 0;
-        cursor.pos.row = 0;
+/// dir, pt, target_col
+///
+/// return new {pt, tcol}
+pub fn movePtFn(dir: Direction, pt: Point, tc: usize) struct { Point, usize } {
+    var crow = pt.row;
+    var ccol = pt.col;
+    var tcol: usize = tc;
+    const n_rows = main.lines_read;
+    switch (dir) {
+        Direction.up => {
+            if (crow < 1) {
+                ccol = 0;
+            } else {
+                crow -= @min(crow, main.content_rows - 1);
+                ccol = @min(main.lines[crow].len, tc);
+            }
+        },
+        Direction.down => {
+            if (crow >= n_rows - 1) {
+                ccol = main.lines[crow].len;
+            } else {
+                crow += @min(n_rows - 1 - main.content_rows - 1, main.content_rows - 1);
+                ccol = @min(main.lines[crow].len, tc);
+            }
+        },
+        Direction.left => {
+            ccol = 0;
+            tcol = ccol;
+        },
+        Direction.right => {
+            ccol = main.lines[crow].len;
+            tcol = ccol;
+        },
     }
 
-    // make sure the cursor is visible after being moved
-    const crow = cursor.pos.row;
-    if (crow < main.view.fst) main.moveView(-@as(isize, @intCast(main.view.fst - crow)));
-    if (crow >= main.view.lst) main.moveView(@intCast(main.view.lst + 1 - crow));
-}
+    // // if tcol unchanged, return null
+    // if (tcol == pt.col) tcol = null;
 
-pub fn cursorPgDn() void {
-    logger.debug("cursorPgDn called!", .{});
-    if (cursor.pos.row + main.content_rows - 1 < main.lines_read) {
-        cursor.pos.row += (main.content_rows - 1);
-    } else {
-        if (cursor.pos.row == main.lines_read - 1) cursor.target_col = main.lines[main.lines_read - 1].len;
-        cursor.pos.row = main.lines_read - 1;
-    }
-
-    // make sure the cursor is visible after being moved
-    const crow = cursor.pos.row;
-    if (crow < main.view.fst) main.moveView(-@as(isize, @intCast(main.view.fst - crow)));
-    logger.debug("moveView {} {}", .{ crow, main.view.lst });
-    if (crow >= main.view.lst) main.moveView(@as(isize, @intCast(crow + 1 - main.view.lst)));
+    return .{ point(crow, ccol), tcol };
 }
 
 /// movable head, immovable anchor.
@@ -219,7 +298,11 @@ pub const Selection = struct {
         _ = fmt;
         _ = options;
 
-        try writer.print("selection ( anchor {any}, head {any} )", .{ self.anchor, self.head });
+        try writer.print("sel (an {any}, he {any})", .{ self.anchor, self.head });
+    }
+    /// is the current selection empty? that is, is `head == anchor`?
+    pub fn isEmpty(self: *const @This()) bool {
+        return self.anchor.row == self.head.row and self.anchor.col == self.head.col;
     }
 };
 pub fn emptySel(pos: Point) Selection {
