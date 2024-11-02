@@ -6,6 +6,8 @@ const os = std.os;
 const linux = std.os.linux;
 const posix = std.posix;
 
+const treez = @import("treez");
+
 const format = @import("format.zig");
 const term_utils = @import("term_utils.zig");
 const pu = @import("parse_utils.zig");
@@ -63,6 +65,18 @@ fn sliceMatch(needle: []const u8, haystack: []const []const u8) bool {
 }
 
 pub fn main() !void {
+    const ziglang = try treez.Language.get("zig");
+
+    var parser = try treez.Parser.create();
+    defer parser.destroy();
+
+    try parser.setLanguage(ziglang);
+    // parser.useStandardLogger();
+
+    const inp = @embedFile("mini.zig");
+    const tree = try parser.parseString(null, inp);
+    defer tree.destroy();
+
     tty = try fs.cwd().openFile("/dev/tty", .{ .mode = .read_write });
     defer tty.close();
 

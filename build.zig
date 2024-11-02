@@ -15,19 +15,19 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
-    const lib = b.addStaticLibrary(.{
-        .name = "editor",
-        // In this case the main source file is merely a path, however, in more
-        // complicated build scripts, this could be a generated file.
-        .root_source_file = b.path("src/mini.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
+    // const lib = b.addStaticLibrary(.{
+    //     .name = "editor",
+    //     // In this case the main source file is merely a path, however, in more
+    //     // complicated build scripts, this could be a generated file.
+    //     .root_source_file = b.path("src/mini.zig"),
+    //     .target = target,
+    //     .optimize = optimize,
+    // });
 
-    // This declares intent for the library to be installed into the standard
-    // location when the user invokes the "install" step (the default step when
-    // running `zig build`).
-    b.installArtifact(lib);
+    // // This declares intent for the library to be installed into the standard
+    // // location when the user invokes the "install" step (the default step when
+    // // running `zig build`).
+    // b.installArtifact(lib);
 
     const exe = b.addExecutable(.{
         .name = "editor",
@@ -35,6 +35,25 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const treez = b.dependency("treez", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // exe.root_module.addImport("treez", treez);
+    exe.root_module.addImport("treez", treez.module("treez"));
+
+    exe.linkLibC();
+
+    exe.linkLibrary(b.dependency("tree-sitter", .{
+        .target = target,
+        .optimize = optimize,
+    }).artifact("tree-sitter"));
+
+    exe.linkLibrary(b.dependency("tree-sitter-zig", .{
+        .target = target,
+        .optimize = optimize,
+    }).artifact("tree-sitter-zig"));
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
