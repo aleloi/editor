@@ -26,6 +26,72 @@ const MatchError = match_keycodes.MatchError;
 /// Control Sequence Introducer string
 const CSI: [2]u8 = .{ '\x1B', '[' };
 
+const ParseResult = struct {
+    raw_cmd: []const u8,
+    parsed_cmd: []const u8
+};
+
+
+/// Reads from the tty into a buffer, then parses key codes from
+/// it. Does blocking reads through posix polling. Intended use:
+/// ```
+///   var bci = BufferedCmdIterator {.tty=tty};
+///   while (true) {
+///      const cmd = try bci.next(); // waits until input available
+///      // handle the cmd somehow
+///      ...
+///   }
+pub const BufferedCmdIterator = struct {
+    buf: [4096]u8 = undefined,
+    parse_buf: [32]u8 = undefined,
+    tty: std.fs.File,
+
+    cmd_it: InputSeqIterator = .{.bytes = &.{}},
+
+    // avoid doing this each 4096 bytes if it's not needed maybe?
+    // CAUTION: BLOCKING!
+    fn waitForInput(self: @This()) !void {
+        var fds: [1]std.posix.pollfd = .{.{
+            .fd = self.tty.handle,
+            .events = std.posix.POLL.IN,
+            .revents = undefined,
+        }};
+        _ = try std.posix.poll(&fds, -1);
+    }
+
+
+    /// BLOCKING! Waits until the next thing comes from the tty.
+    pub fn next(self: *@This()) !ParseResult {
+
+        // Read up to buffer.len bytes from the tty if we have already
+        // parsed everything in previous .next():
+        if (self.cmd_it.bytes.len == 0) {
+            try self.waitForInput();
+
+            const n = try self.tty.read(&self.buf);
+            std.debug.assert(n > 0);
+            if (n == self.buf.len) {
+                logger.err("out of memory reading at least {any} bytes from tty!", .{n});
+                return error.OutOfMemory;
+            }
+            self.cmd_it.bytes = self.buf[0..n];
+        }
+
+        var parse_fbs = std.io.fixedBufferStream(&self.parse_buf);
+        const parse_writer = parse_fbs.writer();
+
+        const raw_cmd: []const u8 = (try self.cmd_it.next()).?;
+
+        parse_fbs.reset();
+        try parseWrite(raw_cmd, parse_writer);
+        const parsed_cmd: []const u8 = parse_fbs.getWritten();
+        std.debug.print("parsed cmd is: {s}\n", .{parsed_cmd});
+        std.debug.print("raw cmd is: {s}\n", .{raw_cmd});
+        return .{.raw_cmd = raw_cmd, .parsed_cmd = parsed_cmd};
+    }
+
+};
+
 // const SliceIter = struct {
 //     slices: []const []u8,
 //     slice: usize = 0,
