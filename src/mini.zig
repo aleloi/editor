@@ -38,7 +38,7 @@ pub var content_rows: usize = undefined;
 pub var non_content_cols: usize = undefined;
 
 /// window dimensions
-var size: Size = undefined;
+var size: term_utils.Size = undefined;
 var tty: fs.File = undefined;
 
 /// minimum lines visible when scrolling past end
@@ -77,11 +77,12 @@ pub fn main() !void {
     const tree = try parser.parseString(null, inp);
     defer tree.destroy();
 
-    tty = try fs.cwd().openFile("/dev/tty", .{ .mode = .read_write });
-    defer tty.close();
+    try term_utils.uncook();
+    defer term_utils.cook() catch {};
 
-    try term_utils.uncook(tty);
-    defer term_utils.cook(tty) catch {};
+    // Still needed for the rendering; I want to abstract it away
+    // too. Not sure how yet.
+    tty = term_utils.tty;
 
     try logging.loggerInit(null);
     defer logging.loggerDeinit();
@@ -90,91 +91,68 @@ pub fn main() !void {
 
     size = try getSize();
 
-    var fds: [1]posix.pollfd = .{.{
-        .fd = tty.handle,
-        .events = posix.POLL.IN,
-        .revents = undefined,
-    }};
-
     // set last visible line
     moveView(0);
 
     try render(null);
 
+    var bci = pu.BufferedCmdIterator{ .tty = term_utils.tty };
+
     while (true) {
-        // var buffer: [1]u8 = undefined;
-        // _ = try tty.read(&buffer);
+        const cmd_full = try bci.next();
+        const cmd = cmd_full.raw_cmd;
+        const cmd2 = cmd_full.parsed_cmd;
 
-        _ = try posix.poll(&fds, -1);
-        var buffer: [1000]u8 = undefined;
-
-        const num_read = try tty.read(&buffer);
-        if (num_read == 0) continue;
-        if (num_read == buffer.len) {
-            logger.err("out of memory reading at least {any} bytes from tty!", .{num_read});
-            return error.OutOfMemory;
-        }
-
-        logger.debug("number of bytes read {any}", .{num_read});
-
-        logger.debug("all bytes {any}", .{buffer[0..num_read]});
-        var cmd_it = pu.InputSeqIterator{ .bytes = buffer[0..num_read] };
-
-        while (try cmd_it.next()) |cmd| {
-            logger.debug("single cmd {any}", .{cmd});
-            parse_fbs.reset();
-            try pu.parseWrite(cmd, parse_writer);
-            const cmd2: []const u8 = parse_fbs.getWritten();
-            blk: {
-                var move_view = false;
-                if (sliceMatch(cmd2, &su.q_eq)) {
-                    logger.debug("input case q, quit", .{});
-                    return;
-                } else if (sliceMatch(cmd2, &su.j_eq)) {
-                    logger.debug("input case j, move view", .{});
-                    // next line
-                    moveView(1);
-                } else if (sliceMatch(cmd2, &su.k_eq)) {
-                    logger.debug("input case k, move view", .{});
-                    // previous line
-                    moveView(-1);
-                } else if (sliceMatch(cmd2, &su.c_arrows)) {
-                    logger.debug("input case ctrl+arrow, move cursor", .{});
-                    // ctrl+arrow, move cursor
-                    move_view = true;
-                    su.movePt(su.matchDirSuffix(cmd2) catch break :blk, false, false, &su.cursor);
-                } else if (sliceMatch(cmd2, &su.sc_arrows)) {
-                    logger.debug("input case shift+ctrl+arrow, move cursor & selection", .{});
-                    // shift+ctrl+arrow, move cursor & selection
-                    move_view = true;
-                    su.movePt(su.matchDirSuffix(cmd2) catch break :blk, true, false, &su.cursor);
-                } else if (sliceMatch(cmd2, &su.fn_arrows)) {
-                    logger.debug("input case fn+arrow, move view", .{});
-                    // fn+arrow, move view
-                    switch (su.matchDirSuffix(cmd2) catch break :blk) {
-                        su.Direction.up => moveView(isz(content_rows - 1)),
-                        su.Direction.down => moveView(isz(content_rows - 1)),
-                        else => {},
-                    }
-                } else if (sliceMatch(cmd2, &su.c_fn_arrows)) {
-                    logger.debug("input case ctrl+fn+arrow, move cursor", .{});
-                    // ctrl+fn+arrow, move cursor
-                    move_view = true;
-                    su.movePt(su.matchDirSuffix(cmd2) catch break :blk, false, true, &su.cursor);
-                } else if (sliceMatch(cmd2, &su.sc_fn_arrows)) {
-                    logger.debug("input case shift+ctrl+fn+arrow, move cursor & selection", .{});
-                    // shift+ctrl+fn+arrow, move cursor & selection
-                    move_view = true;
-                    su.movePt(su.matchDirSuffix(cmd2) catch break :blk, true, true, &su.cursor);
+        logger.debug("single cmd, raw: {any} ({s}), parsed: {any} ({s})", .{ cmd, cmd, cmd2, cmd2 });
+        blk: {
+            var move_view = false;
+            if (sliceMatch(cmd2, &su.q_eq)) {
+                logger.debug("input case q, quit", .{});
+                return;
+            } else if (sliceMatch(cmd2, &su.j_eq)) {
+                logger.debug("input case j, move view", .{});
+                // next line
+                moveView(1);
+            } else if (sliceMatch(cmd2, &su.k_eq)) {
+                logger.debug("input case k, move view", .{});
+                // previous line
+                moveView(-1);
+            } else if (sliceMatch(cmd2, &su.c_arrows)) {
+                logger.debug("input case ctrl+arrow, move cursor", .{});
+                // ctrl+arrow, move cursor
+                move_view = true;
+                su.movePt(su.matchDirSuffix(cmd2) catch break :blk, false, false, &su.cursor);
+            } else if (sliceMatch(cmd2, &su.sc_arrows)) {
+                logger.debug("input case shift+ctrl+arrow, move cursor & selection", .{});
+                // shift+ctrl+arrow, move cursor & selection
+                move_view = true;
+                su.movePt(su.matchDirSuffix(cmd2) catch break :blk, true, false, &su.cursor);
+            } else if (sliceMatch(cmd2, &su.fn_arrows)) {
+                logger.debug("input case fn+arrow, move view", .{});
+                // fn+arrow, move view
+                switch (su.matchDirSuffix(cmd2) catch break :blk) {
+                    su.Direction.up => moveView(isz(content_rows - 1)),
+                    su.Direction.down => moveView(isz(content_rows - 1)),
+                    else => {},
                 }
-                if (move_view) {
-                    const t_row = su.cursor.pos.row;
-                    if (t_row >= view.lst) moveView(isz(t_row - view.lst) + 1) else if (t_row < view.fst) moveView(isz(t_row) - isz(view.fst));
-                }
+            } else if (sliceMatch(cmd2, &su.c_fn_arrows)) {
+                logger.debug("input case ctrl+fn+arrow, move cursor", .{});
+                // ctrl+fn+arrow, move cursor
+                move_view = true;
+                su.movePt(su.matchDirSuffix(cmd2) catch break :blk, false, true, &su.cursor);
+            } else if (sliceMatch(cmd2, &su.sc_fn_arrows)) {
+                logger.debug("input case shift+ctrl+fn+arrow, move cursor & selection", .{});
+                // shift+ctrl+fn+arrow, move cursor & selection
+                move_view = true;
+                su.movePt(su.matchDirSuffix(cmd2) catch break :blk, true, true, &su.cursor);
             }
-
-            try render(cmd);
+            if (move_view) {
+                const t_row = su.cursor.pos.row;
+                if (t_row >= view.lst) moveView(isz(t_row - view.lst) + 1) else if (t_row < view.fst) moveView(isz(t_row) - isz(view.fst));
+            }
         }
+
+        try render(cmd);
     }
 }
 
@@ -329,23 +307,6 @@ fn clear(writer: anytype) !void {
     try writer.writeAll("\x1B[2J");
 }
 
-const Size = struct { width: usize, height: usize };
-/// get the window size
-fn getSize() !Size {
-    var win_size = mem.zeroes(linux.winsize);
-    if (linux.ioctl(tty.handle, linux.T.IOCGWINSZ, @intFromPtr(&win_size)) != 0) {
-        panicFmt("getsize failed ioctl()", .{});
-    }
-    const height: usize = win_size.ws_row;
-    // update number of rows available for content
-    if (height < non_content_rows) unreachable;
-    content_rows = win_size.ws_row - non_content_rows;
-    return Size{
-        .height = win_size.ws_row,
-        .width = win_size.ws_col,
-    };
-}
-
 /// read file content from stdin.
 /// raise exception if longer than 5 MB.
 fn getInp() !void {
@@ -387,6 +348,13 @@ pub fn moveView(ind: isize) void {
     }
     view.lst = @min(lines_read, view.fst + content_rows);
     if (view.lst <= view.fst or view.lst > lines_read) panicFmt("moveView caused invalid view {any}\n", .{view});
+}
+
+fn getSize() !term_utils.Size {
+    const res = try term_utils.getSize();
+    if (res.height < non_content_rows) unreachable;
+    content_rows = res.height - non_content_rows;
+    return res;
 }
 
 // this seems to ensure all tests are run

@@ -60,3 +60,9 @@ pyrightconfig.json
 src/test_*.zig
 src/test_*.py
 src/python/test_*.py
+
+# emacs save files
+*~
+
+# local dev files
+stderr

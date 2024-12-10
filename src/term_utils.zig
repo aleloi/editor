@@ -3,18 +3,24 @@ const std = @import("std");
 const fs = std.fs;
 const linux = std.os.linux;
 
+const logging = @import("logging.zig");
+
 /// the original settings
 var orig_termios: linux.termios = undefined;
 /// our alternative settings
 var alt_termios: linux.termios = undefined;
 
+pub var tty: fs.File = undefined;
+
 /// enter alternative buffer, saving current state
-pub fn uncook(tty: fs.File) !void {
+pub fn uncook() !void {
+    tty = try std.fs.cwd().openFile("/dev/tty", .{ .mode = .read_write });
+
     const writer = tty.writer();
     if (linux.tcgetattr(tty.handle, &orig_termios) != 0) {
         @panic("failed tcgetattr()");
     }
-    errdefer cook(tty) catch {};
+    errdefer cook() catch {};
 
     alt_termios = orig_termios;
     alt_termios.lflag.ECHO = false;
@@ -42,7 +48,9 @@ pub fn uncook(tty: fs.File) !void {
 }
 
 /// exit alternative buffer, restore previous state
-pub fn cook(tty: fs.File) !void {
+pub fn cook() !void {
+    defer tty.close();
+
     const writer = tty.writer();
     try writer.writeAll("\x1B[2J"); // Clear buffer.
     try writer.writeAll("\x1B[?1049l"); // Disable alternative buffer.
@@ -53,4 +61,18 @@ pub fn cook(tty: fs.File) !void {
     if (linux.tcsetattr(tty.handle, .FLUSH, &orig_termios) != 0) {
         @panic("cook failed tcsetattr()");
     }
+}
+
+pub const Size = struct { width: usize, height: usize };
+/// get the window size
+pub fn getSize() !Size {
+    var win_size = std.mem.zeroes(linux.winsize);
+    if (linux.ioctl(tty.handle, linux.T.IOCGWINSZ, @intFromPtr(&win_size)) != 0) {
+        logging.panicFmt("getsize failed ioctl()", .{});
+    }
+
+    return Size{
+        .height = win_size.ws_row,
+        .width = win_size.ws_col,
+    };
 }
