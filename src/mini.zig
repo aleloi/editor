@@ -38,7 +38,7 @@ pub var content_rows: usize = undefined;
 pub var non_content_cols: usize = undefined;
 
 /// window dimensions
-var size: Size = undefined;
+var size: term_utils.Size = undefined;
 var tty: fs.File = undefined;
 
 /// minimum lines visible when scrolling past end
@@ -88,7 +88,7 @@ pub fn main() !void {
 
     try getInp();
 
-    size = try getSize();
+    size = try term_utils.getSize();
 
     var fds: [1]posix.pollfd = .{.{
         .fd = tty.handle,
@@ -327,23 +327,6 @@ fn moveCursor(writer: anytype, row: usize, col: usize) !void {
 /// clear the buffer
 fn clear(writer: anytype) !void {
     try writer.writeAll("\x1B[2J");
-}
-
-const Size = struct { width: usize, height: usize };
-/// get the window size
-fn getSize() !Size {
-    var win_size = mem.zeroes(linux.winsize);
-    if (linux.ioctl(tty.handle, linux.T.IOCGWINSZ, @intFromPtr(&win_size)) != 0) {
-        panicFmt("getsize failed ioctl()", .{});
-    }
-    const height: usize = win_size.ws_row;
-    // update number of rows available for content
-    if (height < non_content_rows) unreachable;
-    content_rows = win_size.ws_row - non_content_rows;
-    return Size{
-        .height = win_size.ws_row,
-        .width = win_size.ws_col,
-    };
 }
 
 /// read file content from stdin.

@@ -1,5 +1,32 @@
 const std = @import("std");
 
+var target: std.Build.ResolvedTarget = undefined;
+var optimize: std.builtin.OptimizeMode = undefined;
+
+fn addDeps(exe: *std.Build.Step.Compile, b: *std.Build) void {
+    // const target = b.standardTargetOptions(.{});
+    // const optimize = b.standardOptimizeOption(.{});
+
+    const treez = b.dependency("treez", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    exe.root_module.addImport("treez", treez.module("treez"));
+
+    exe.linkLibC();
+
+    exe.linkLibrary(b.dependency("tree-sitter", .{
+        .target = target,
+        .optimize = optimize,
+    }).artifact("tree-sitter"));
+
+    exe.linkLibrary(b.dependency("tree-sitter-zig", .{
+        .target = target,
+        .optimize = optimize,
+    }).artifact("tree-sitter-zig"));
+}
+
 // Although this function looks imperative, note that its job is to
 // declaratively construct a build graph that will be executed by an external
 // runner.
@@ -8,12 +35,12 @@ pub fn build(b: *std.Build) void {
     // what target to build for. Here we do not override the defaults, which
     // means any target is allowed, and the default is native. Other options
     // for restricting supported target set are available.
-    const target = b.standardTargetOptions(.{});
+    target = b.standardTargetOptions(.{});
 
     // Standard optimization options allow the person running `zig build` to select
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
     // set a preferred release mode, allowing the user to decide how to optimize.
-    const optimize = b.standardOptimizeOption(.{});
+    optimize = b.standardOptimizeOption(.{});
 
     // const lib = b.addStaticLibrary(.{
     //     .name = "editor",
@@ -35,25 +62,23 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const treez = b.dependency("treez", .{
-        .target = target,
-        .optimize = optimize,
-    });
 
-    // exe.root_module.addImport("treez", treez);
-    exe.root_module.addImport("treez", treez.module("treez"));
+    addDeps(exe, b);
 
-    exe.linkLibC();
+    // // exe.root_module.addImport("treez", treez);
+    // exe.root_module.addImport("treez", treez.module("treez"));
 
-    exe.linkLibrary(b.dependency("tree-sitter", .{
-        .target = target,
-        .optimize = optimize,
-    }).artifact("tree-sitter"));
+    // exe.linkLibC();
 
-    exe.linkLibrary(b.dependency("tree-sitter-zig", .{
-        .target = target,
-        .optimize = optimize,
-    }).artifact("tree-sitter-zig"));
+    // exe.linkLibrary(b.dependency("tree-sitter", .{
+    //     .target = target,
+    //     .optimize = optimize,
+    // }).artifact("tree-sitter"));
+
+    // exe.linkLibrary(b.dependency("tree-sitter-zig", .{
+    //     .target = target,
+    //     .optimize = optimize,
+    // }).artifact("tree-sitter-zig"));
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
@@ -101,6 +126,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    addDeps(exe_unit_tests, b);
+    addDeps(lib_unit_tests, b);
 
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
 
@@ -122,6 +149,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    addDeps(exe_check, b);
 
     // Any other code to define dependencies would
     // probably be here.

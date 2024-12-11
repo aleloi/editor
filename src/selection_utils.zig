@@ -9,6 +9,9 @@ const posix = std.posix;
 const write_utils = @import("write_utils.zig");
 const main = @import("mini.zig");
 const mu = @import("misc_utils.zig");
+const du = @import("dll_utils.zig");
+const doc = @import("document.zig");
+const ku = @import("key_utils.zig");
 
 // 0-indexing
 pub const Point = struct {
@@ -56,10 +59,33 @@ pub fn cmpPoints(A: Point, B: Point) bool {
     return true;
 }
 
+/// A == B ?
+pub fn eqPts(A: Point, B: Point) bool {
+    return A.row == B.row and A.col == B.col;
+}
+
 /// is A, B, C sorted?
 /// specifically: is A <= B < C
 pub fn isBetween(A: Point, B: Point, C: Point) bool {
     return ((!cmpPoints(B, A)) and cmpPoints(B, C));
+}
+
+/// how many bytes from A to B ? needs A <= B
+/// closed or half-open interval?
+pub fn byteDiff(A: Point, B: Point) !usize {
+    // check if A <= B
+    if (!eqPts(A, minPt(A, B))) return error.Other;
+    var ret: usize = 0;
+    const fst = try doc.root.getNode(A.row + 1);
+    const lst = try doc.root.getNode(B.row + 1);
+    var curr = fst;
+    for (A.row..(B.row + 1)) |_| {
+        ret += (try curr.getSlice()).len;
+        curr = try curr.getNode(1);
+    }
+    ret -= A.col;
+    ret -= ((try lst.getSlice()).len - B.col); // TODO think about this
+    return ret;
 }
 
 pub const logger = main.logger;
@@ -126,38 +152,9 @@ pub fn matchDirSuffix(str: []const u8) !Direction {
     return error.Error;
 }
 
-const dirs: [4]Direction = .{ Direction.up, Direction.down, Direction.left, Direction.right };
+const dirs = ku.dirs;
 
-pub const Direction = enum {
-    up,
-    down,
-    left,
-    right,
-    fn pt(self: Direction) struct { isize, isize } {
-        switch (self) {
-            Direction.up => return .{ -1, 0 },
-            Direction.down => return .{ 1, 0 },
-            Direction.left => return .{ 0, -1 },
-            Direction.right => return .{ 0, 1 },
-        }
-    }
-    pub fn format(
-        self: *const @This(),
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        _ = fmt;
-        _ = options;
-
-        try writer.writeAll(switch (self.*) {
-            Direction.up => "up",
-            Direction.down => "down",
-            Direction.left => "left",
-            Direction.right => "right",
-        });
-    }
-};
+pub const Direction = ku.Direction;
 
 // /// unpack Point
 // pub fn ptUp(pt: Point) struct { usize, usize } {

@@ -1,5 +1,6 @@
 //! terminal utils, mainly entering/exiting alternative buffer and mode
 const std = @import("std");
+const mem = std.mem;
 const fs = std.fs;
 const linux = std.os.linux;
 
@@ -53,4 +54,21 @@ pub fn cook(tty: fs.File) !void {
     if (linux.tcsetattr(tty.handle, .FLUSH, &orig_termios) != 0) {
         @panic("cook failed tcsetattr()");
     }
+}
+
+const Size = struct { width: usize, height: usize };
+/// get the window size
+fn getSize() !Size {
+    var win_size = mem.zeroes(linux.winsize);
+    if (linux.ioctl(tty.handle, linux.T.IOCGWINSZ, @intFromPtr(&win_size)) != 0) {
+        panicFmt("getsize failed ioctl()", .{});
+    }
+    const height: usize = win_size.ws_row;
+    // update number of rows available for content
+    if (height < non_content_rows) unreachable;
+    content_rows = win_size.ws_row - non_content_rows;
+    return Size{
+        .height = win_size.ws_row,
+        .width = win_size.ws_col,
+    };
 }

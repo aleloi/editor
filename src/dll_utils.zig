@@ -1,8 +1,19 @@
 //! dll_utils, DLL for file rows
 const std = @import("std");
 const expect = std.testing.expect;
-const print = std.debug.print;
 const Allocator = std.mem.Allocator;
+
+const logging = @import("logging.zig");
+
+pub const std_options = logging.std_options;
+pub const logger = logging.default_logger;
+pub const panic = logging.panic;
+pub const panicFmt = logging.panicFmt;
+
+const _ = logging.loggerInit(null);
+
+// const log_writer = logging.logWriter(.debug);
+// const logger.debug = log_writer.logger.debug;
 
 const DllError = error{
     /// buffer too small
@@ -41,7 +52,6 @@ fn up(maybe: anytype) !@TypeOf(maybe orelse unreachable) {
 }
 
 test "unpack " {
-    const logger = @import("logging.zig").default_logger;
     var opt: ?u8 = undefined;
 
     logger.debug("unpack {} \n", .{try up(opt)});
@@ -67,7 +77,7 @@ const NodeType = enum { fst, mid, lst };
 /// next: ?*Node = null,
 ///
 /// data: row_arr = row_arr_d,
-const Node = struct {
+pub const Node = struct {
     node_type: NodeType = NodeType.mid,
     prev: ?*Node = null,
     next: ?*Node = null,
@@ -101,7 +111,7 @@ const Node = struct {
             return DllError.EolError;
         }
     }
-    fn getNode(self: *Node, index: usize) !*Node {
+    pub fn getNode(self: *Node, index: usize) !*Node {
         var curr: *Node = self;
         var idx = index;
         while (idx > 0) {
@@ -110,7 +120,7 @@ const Node = struct {
         }
         return curr;
     }
-    fn getNodeRev(self: *Node, index: usize) !*Node {
+    pub fn getNodeRev(self: *Node, index: usize) !*Node {
         var curr: *Node = self;
         var idx = index;
         while (idx > 0) {
@@ -119,10 +129,15 @@ const Node = struct {
         }
         return curr;
     }
+    pub fn getSlice(self: *Node) ![]u8 {
+        if (self.node_type != NodeType.mid) return DllError.Other;
+        logger.debug("getSlice len {any} data {any} ret {any}", .{ try self.getLen(), self.data, self.data[0..try self.getLen()] });
+        return self.data[0..try self.getLen()];
+    }
 };
 
 /// linear, avoid if possible
-fn getNumLinesAfter(node: *Node) !usize {
+pub fn getNumLinesAfter(node: *Node) !usize {
     var iter = NodeIterator{ .curr = node };
     var ret: usize = 0;
     while (iter.next()) |_| {
@@ -230,8 +245,8 @@ fn delete(allocator: Allocator, root: *Node, from: Point, to: Point) !void {
     try replaceSegment(.{ fr_node, to_node }, .{ new_fst.next, new_lst.prev });
 
     try (try root.getNode(fr_row)).getPart(compare_buf[1..], fr_col, fr_col + 1);
-    print("orig_to_char {}\n", .{compare_buf[0]});
-    print("new_fr_char {}\n", .{compare_buf[1]});
+    logger.debug("orig_to_char {}\n", .{compare_buf[0]});
+    logger.debug("new_fr_char {}\n", .{compare_buf[1]});
     if (compare_buf[0] != compare_buf[1]) @panic("failed to parse on deletion!\n");
 }
 
@@ -240,52 +255,52 @@ fn replace(allocator: Allocator, root: *Node, from: Point, to: Point, maybe_with
     try insert(allocator, root, from, maybe_with orelse return DllError.Other);
 }
 
-fn printLines(root: *Node) !void {
-    print("==================\n", .{});
-    print("printLines\n", .{});
+pub fn printLines(root: *Node) !void {
+    logger.debug("==================\n", .{});
+    logger.debug("printLines\n", .{});
     var buf: row_arr = row_arr_d;
     var n_it = NodeIterator{ .curr = root };
     while (n_it.next()) |n| {
         if (n.node_type == NodeType.mid) {
-            print("{any}\n", .{buf[0..(try n.getData(&buf))]});
+            logger.debug("{any}\n", .{buf[0..(try n.getData(&buf))]});
         }
     }
-    print("==================\n", .{});
+    logger.debug("==================\n", .{});
 }
 
 fn printLinesBuf(buf: []const u8) !void {
-    print("==================\n", .{});
-    print("printLinesBuf\n", .{});
+    logger.debug("==================\n", .{});
+    logger.debug("printLinesBuf\n", .{});
     var l_it = LineIterator{ .data = buf };
-    while (l_it.next()) |l| if (l.len > 0) print("{any}\n", .{l});
-    print("==================\n", .{});
+    while (l_it.next()) |l| if (l.len > 0) logger.debug("{any}\n", .{l});
+    logger.debug("==================\n", .{});
 }
 
 fn printNode(opt_node: ?*Node) !void {
-    print("===============\n", .{});
-    print("printNode\n", .{});
+    logger.debug("===============\n", .{});
+    logger.debug("printNode\n", .{});
     if (opt_node) |node| {
-        print("addr {any}\n", .{@intFromPtr(node)});
-        print("node_type {any}\n", .{node.node_type});
-        print("prev {any}\n", .{@intFromPtr(node.prev)});
-        print("next {any}\n", .{@intFromPtr(node.next)});
-        print("data.len {}\n", .{try node.getLen()});
-        print("data {any}\n", .{node.data});
+        logger.debug("addr {any}\n", .{@intFromPtr(node)});
+        logger.debug("node_type {any}\n", .{node.node_type});
+        logger.debug("prev {any}\n", .{@intFromPtr(node.prev)});
+        logger.debug("next {any}\n", .{@intFromPtr(node.next)});
+        logger.debug("data.len {}\n", .{try node.getLen()});
+        logger.debug("data {any}\n", .{node.data});
     }
-    print("===============\n", .{});
+    logger.debug("===============\n", .{});
 }
 
 fn printNodes(root: *Node) !void {
-    print("==================\n", .{});
-    print("printNodes\n", .{});
-    // print("{any}\n", .{root});
+    logger.debug("==================\n", .{});
+    logger.debug("printNodes\n", .{});
+    // logger.debug("{any}\n", .{root});
     try printNode(root);
     var n_it = NodeIterator{ .curr = root };
     while (n_it.next()) |n| {
-        // print("{any}\n", .{n});
+        // logger.debug("{any}\n", .{n});
         try printNode(n);
     }
-    print("==================\n", .{});
+    logger.debug("==================\n", .{});
 }
 
 /// NB excludes the given node, yields all following ones
@@ -316,12 +331,12 @@ const LineIterator = struct {
     data: []const u8,
     // idx: usize = 0,
     fn next(self: *@This()) ?[]const u8 {
-        // print("next data {any}\n", .{self.data});
+        // logger.debug("next data {any}\n", .{self.data});
         // var end = idx+1;
         var idx: usize = 0;
         var ret: ?[]const u8 = null;
         while (true) {
-            if (idx > self.data.len) {
+            if (idx >= self.data.len) {
                 return ret;
             }
             idx += 1;
@@ -344,40 +359,40 @@ fn initNode(allocator: Allocator, node: Node, maybe_data: ?[]const u8) !*Node {
         @memcpy(ret.data[0..len], data[0..len]);
         if (data.len == 0 or data[data.len - 1] != '\n') ret.data[data.len] = '\n';
     }
-    // print("=====================\n", .{});
-    // print("allocated at {any}\n", .{@intFromPtr(ret)});
-    // print("node_type {any}\n", .{ret.node_type});
-    // print("prev {any}\n", .{@intFromPtr(ret.prev)});
-    // print("next {any}\n", .{@intFromPtr(ret.next)});
-    // print("data.len {}\n", .{try ret.getData(&ret.data)});
-    // print("data {any}\n", .{ret.data});
-    // print("=====================\n", .{});
+    // logger.debug("=====================\n", .{});
+    // logger.debug("allocated at {any}\n", .{@intFromPtr(ret)});
+    // logger.debug("node_type {any}\n", .{ret.node_type});
+    // logger.debug("prev {any}\n", .{@intFromPtr(ret.prev)});
+    // logger.debug("next {any}\n", .{@intFromPtr(ret.next)});
+    // logger.debug("data.len {}\n", .{try ret.getData(&ret.data)});
+    // logger.debug("data {any}\n", .{ret.data});
+    // logger.debug("=====================\n", .{});
     return ret;
 }
 
 /// create DLL from string, returning root node, end node
-fn fromStr(allocator: Allocator, str: []const u8) !struct { *Node, *Node } {
+pub fn fromStr(allocator: Allocator, str: []const u8) !struct { *Node, *Node } {
     const root: *Node = try initNode(allocator, .{ .node_type = NodeType.fst }, null);
     var prev: *Node = root;
     try printLinesBuf(str);
     var line_it = LineIterator{ .data = str };
     //std.mem.splitSequence(u8, str, "\n");
     while (line_it.next()) |line| {
-        // print("line_it {any}\n", .{line});
-        // print("line_it len {any}\n", .{line.len});
+        // logger.debug("line_it {any}\n", .{line});
+        // logger.debug("line_it len {any}\n", .{line.len});
         prev.next = try initNode(allocator, .{ .prev = prev }, line);
         prev = prev.next orelse unreachable;
     }
     prev.next = try initNode(allocator, .{ .node_type = NodeType.lst, .prev = prev }, null);
-    print("=====================\n", .{});
-    print("fromStr\n", .{});
-    print("str {any}\n", .{str});
-    // print("iterating...\n", .{});
+    logger.debug("=====================\n", .{});
+    logger.debug("fromStr\n", .{});
+    logger.debug("str {any}\n", .{str});
+    // logger.debug("iterating...\n", .{});
     // var node_iter = NodeIterator{ .curr = root };
     // while (node_iter.next()) |curr| {
-    //     print("{any}\n", .{curr});
+    //     logger.debug("{any}\n", .{curr});
     // }
-    print("=====================\n", .{});
+    logger.debug("=====================\n", .{});
     return .{ root, prev.next.? };
 }
 
@@ -386,14 +401,14 @@ fn fromStr(allocator: Allocator, str: []const u8) !struct { *Node, *Node } {
 /// returns bytes written
 ///
 /// may raise DllError
-fn toStr(root: *Node, orig_buf: []u8) !usize {
-    // print("toStr\n", .{});
+pub fn toStr(root: *Node, orig_buf: []u8) !usize {
+    // logger.debug("toStr\n", .{});
     var buf = orig_buf[0..];
     var node_iter = NodeIterator{ .curr = root };
     while (node_iter.next()) |curr| {
         buf = buf[(try curr.getData(buf))..];
     }
-    // print("toStr end\n", .{});
+    // logger.debug("toStr end\n", .{});
     return orig_buf.len - buf.len;
 }
 
@@ -429,13 +444,13 @@ fn getLine(root: *Node, buf: []u8, index: usize) !struct { *Node, usize } {
 
 test "test fromStr" {
     // if (true) return error.SkipZigTest;
-    print("===============================================\n", .{});
-    print("test fromStr\n", .{});
+    logger.debug("===============================================\n", .{});
+    logger.debug("test fromStr\n", .{});
     var buf: [1000]u8 = .{0} ** 1000;
     const str = [_]u8{ 'a', 'a', 'a' };
     // const str = [_]u8{ 'a', 'b', 'c', ' ', 'a', 's', 'd', '\n', 'a', 'a', 's', 'd', 'a', 's' };
-    print("str_orig {s}\n", .{str});
-    print("str_orig.len {}\n", .{str.len});
+    logger.debug("str_orig {s}\n", .{str});
+    logger.debug("str_orig.len {}\n", .{str.len});
 
     var buffer: [1000]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buffer);
@@ -443,11 +458,11 @@ test "test fromStr" {
 
     for (0..str.len) |i| buf[i] = str[i];
     const root, _ = try fromStr(allocator, buf[0..str.len]);
-    print("num_lines {any}\n", .{getNumLinesAfter(root)});
+    logger.debug("num_lines {any}\n", .{getNumLinesAfter(root)});
     var ret_buf: [100]u8 = .{0} ** 100;
     const bytes_read = try toStr(root, &ret_buf);
-    print("bytes_read {any}\n", .{bytes_read});
-    print("{s}\n", .{ret_buf[0..bytes_read]});
+    logger.debug("bytes_read {any}\n", .{bytes_read});
+    logger.debug("{s}\n", .{ret_buf[0..bytes_read]});
 
     try expect(std.mem.eql(u8, str[0..str.len], ret_buf[0..str.len]));
 
@@ -460,27 +475,27 @@ test "test fromStr" {
     );
 
     const bytes_read_2 = try toStr(root, &ret_buf);
-    print("bytes_read {any}\n", .{bytes_read_2});
-    print("\"{any}\"\n", .{ret_buf[0..bytes_read_2]});
+    logger.debug("bytes_read {any}\n", .{bytes_read_2});
+    logger.debug("\"{any}\"\n", .{ret_buf[0..bytes_read_2]});
 }
 
 test "test LineIterator" {
     // if (true) return error.SkipZigTest;
-    print("===============================================\n", .{});
-    print("test LineIterator\n", .{});
+    logger.debug("===============================================\n", .{});
+    logger.debug("test LineIterator\n", .{});
     var buf: [1000]u8 = undefined;
     const test_str = "bla\nbl\n\n\nbl";
     const test_len: usize = 11;
-    print("test_str {any}\n", .{test_str});
+    logger.debug("test_str {any}\n", .{test_str});
     for (0..test_len) |i| buf[i] = test_str[i];
     var li = LineIterator{ .data = buf[0..test_len] };
-    while (li.next()) |line| print("line {any}\n", .{line});
+    while (li.next()) |line| logger.debug("line {any}\n", .{line});
 }
 
 test "test insert" {
     // if (true) return error.SkipZigTest;
-    print("===============================================\n", .{});
-    print("test insert\n", .{});
+    logger.debug("===============================================\n", .{});
+    logger.debug("test insert\n", .{});
     var buffer: [1000]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buffer);
     const allocator = fba.allocator();
@@ -490,30 +505,30 @@ test "test insert" {
     const test_str_mod = "bla\na\nbl\n\n\nbl\n";
     const test_len: usize = 12;
     try expect(test_len == test_str.len);
-    print("test_str {any}\n", .{test_str});
+    logger.debug("test_str {any}\n", .{test_str});
     for (0..test_len) |i| buf[i] = test_str[i];
     const root, _ = try fromStr(allocator, buf[0..test_len]);
     try printLines(root);
 
     try insert(allocator, root, point(1, 4), &[1]u8{'a'});
     // var li = LineIterator{ .data = buf[0..test_len] };
-    // while (li.next()) |line| print("line {any}\n", .{line});
+    // while (li.next()) |line| logger.debug("line {any}\n", .{line});
     try printLinesBuf(buf[0..test_len]);
 
-    print("num_nodes {}\n", .{try getNumLinesAfter(root)});
+    logger.debug("num_nodes {}\n", .{try getNumLinesAfter(root)});
 
-    // print("toStr {any}\n", .{root});
+    // logger.debug("toStr {any}\n", .{root});
     var ret_buf: [100]u8 = .{0} ** 100;
     const bytes_read = try toStr(root, &ret_buf);
-    print("bytes_read {any}\n", .{bytes_read});
-    print("{s}\n", .{ret_buf[0..bytes_read]});
-    // // print("a {any}\n", .{ret_buf[0..bytes_read]});
-    // // print("b {any}\n", .{test_str[0..bytes_read]});
+    logger.debug("bytes_read {any}\n", .{bytes_read});
+    logger.debug("{s}\n", .{ret_buf[0..bytes_read]});
+    // // logger.debug("a {any}\n", .{ret_buf[0..bytes_read]});
+    // // logger.debug("b {any}\n", .{test_str[0..bytes_read]});
 
     // var ret_buf_2: [100]u8 = .{0} ** 100;
     // const bytes_read_2 = try getLines(root, &ret_buf_2, null, null);
-    // print("bytes_read_2 {any}\n", .{bytes_read_2});
-    // print("{s}\n", .{ret_buf_2[0..bytes_read_2]});
+    // logger.debug("bytes_read_2 {any}\n", .{bytes_read_2});
+    // logger.debug("{s}\n", .{ret_buf_2[0..bytes_read_2]});
     try expect(bytes_read == test_str_mod.len);
     try expect(std.mem.eql(
         u8,
@@ -525,10 +540,10 @@ test "test insert" {
 }
 
 test "insert after line vs before next line" {
-    // print("{c}\n", .{170});
+    // logger.debug("{c}\n", .{170});
     // if (true) return error.SkipZigTest;
-    print("===============================================\n", .{});
-    print("test insert after line vs before next line\n", .{});
+    logger.debug("===============================================\n", .{});
+    logger.debug("test insert after line vs before next line\n", .{});
     var buffer: [1000]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buffer);
     const allocator = fba.allocator();
@@ -560,8 +575,8 @@ test "insert after line vs before next line" {
 
 test "replace wrap" {
     // if (true) return error.SkipZigTest;
-    print("===============================================\n", .{});
-    print("replace wrap\n", .{});
+    logger.debug("===============================================\n", .{});
+    logger.debug("replace wrap\n", .{});
     var buffer: [1000]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buffer);
     const allocator = fba.allocator();
@@ -593,8 +608,8 @@ test "replace wrap" {
 
 test "replace general" {
     // if (true) return error.SkipZigTest;
-    print("===============================================\n", .{});
-    print("replace general\n", .{});
+    logger.debug("===============================================\n", .{});
+    logger.debug("replace general\n", .{});
     var buffer: [1000]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buffer);
     const allocator = fba.allocator();
@@ -605,7 +620,7 @@ test "replace general" {
     @memcpy(buf[0..test_str.len], test_str);
 
     const root1, _ = try fromStr(allocator, buf[0..test_str.len]);
-    print("orig\n", .{});
+    logger.debug("orig\n", .{});
     try printLines(root1);
 
     // const root2, _ = try fromStr(allocator, buf[0..test_str.len]);
@@ -629,8 +644,8 @@ test "replace general" {
 
 test "delete all" {
     // if (true) return error.SkipZigTest;
-    print("===============================================\n", .{});
-    print("delete all\n", .{});
+    logger.debug("===============================================\n", .{});
+    logger.debug("delete all\n", .{});
     var buffer: [1000]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buffer);
     const allocator = fba.allocator();
@@ -641,7 +656,7 @@ test "delete all" {
     @memcpy(buf[0..test_str.len], test_str);
 
     const root1, _ = try fromStr(allocator, buf[0..test_str.len]);
-    print("orig\n", .{});
+    logger.debug("orig\n", .{});
     try printLines(root1);
 
     // const root2, _ = try fromStr(allocator, buf[0..test_str.len]);
