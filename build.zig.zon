@@ -43,11 +43,16 @@
             .url = "https://github.com/aleloi/tree-sitter-zig/archive/b677dba1f925424787048180f5bbe2cf7f5835d4.tar.gz",
             .hash = "1220f4c3957b38a0b96ec259dbd8f354a6e8ca5735164f8190885882454188e80bd0",
         },
+        .tracy = .{
+            .url = "https://github.com/aleloi/zig-tracy-v0-11-2/archive/160edfc14abc6ecb7ef8f1cb0b306c2f470d8027.tar.gz",
+            .hash = "1220909d1df7c7990c106671374f53e96c0225283567f7e9e0729a5bd907b7965f7b",
+        },
     },
     .paths = .{
         "build.zig",
         "build.zig.zon",
         "src",
+        "tests",
         // For example...
         //"LICENSE",
         "README.md",

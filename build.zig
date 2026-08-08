@@ -42,6 +42,17 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     optimize = b.standardOptimizeOption(.{});
 
+    const tracy_enable = b.option(bool, "tracy_enable", "Enable profiling") orelse true;
+    const tracy = b.dependency("tracy", .{
+        .target = target,
+        .optimize = optimize,
+        .tracy_enable = tracy_enable,
+    });
+
+    const rope_mod = b.createModule(.{
+        .root_source_file = b.path("src/rope.zig"),
+    });
+
     // const lib = b.addStaticLibrary(.{
     //     .name = "editor",
     //     // In this case the main source file is merely a path, however, in more
@@ -64,6 +75,11 @@ pub fn build(b: *std.Build) void {
     });
 
     addDeps(exe, b);
+
+    exe.root_module.addImport("rope", rope_mod);
+    exe.root_module.addImport("tracy", tracy.module("tracy"));
+    exe.linkLibrary(tracy.artifact("tracy"));
+    exe.linkLibCpp();
 
     // // exe.root_module.addImport("treez", treez);
     // exe.root_module.addImport("treez", treez.module("treez"));
@@ -141,6 +157,28 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_lib_unit_tests.step);
     test_step.dependOn(&run_exe_unit_tests.step);
 
+    const rope_test_files: []const []const u8 = &.{
+        "tests/rope_tests.zig",
+        "src/rope.zig",
+        "src/render_buffer.zig",
+        "src/document.zig",
+    };
+    for (rope_test_files) |test_file| {
+        const rope_test = b.addTest(.{
+            .root_source_file = b.path(test_file),
+            .target = target,
+            .optimize = optimize,
+        });
+        rope_test.root_module.addImport("rope", rope_mod);
+        // document.zig imports tracy
+        rope_test.root_module.addImport("tracy", tracy.module("tracy"));
+        rope_test.linkLibrary(tracy.artifact("tracy"));
+        rope_test.linkLibCpp();
+        const run_rope_test = b.addRunArtifact(rope_test);
+        run_rope_test.has_side_effects = true;
+        test_step.dependOn(&run_rope_test.step);
+    }
+
     // zig build test --summary all
 
     const exe_check = b.addExecutable(.{
@@ -150,6 +188,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     addDeps(exe_check, b);
+
+    exe_check.root_module.addImport("rope", rope_mod);
+    exe_check.root_module.addImport("tracy", tracy.module("tracy"));
+    exe_check.linkLibrary(tracy.artifact("tracy"));
+    exe_check.linkLibCpp();
 
     // Any other code to define dependencies would
     // probably be here.
