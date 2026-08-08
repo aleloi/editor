@@ -2,47 +2,42 @@ const std = @import("std");
 const fs = std.fs;
 const io = std.io;
 const mem = std.mem;
-const os = std.os;
 const linux = std.os.linux;
-const posix = std.posix;
+const print = std.debug.print;
 
+const doc = @import("document.zig");
+const Cursor = doc.Cursor;
+const Selection = doc.Selection;
+const Point = doc.Pos;
+const Direction = doc.Direction;
+
+const tracy = @import("tracy");
 const treez = @import("treez");
 
 const format = @import("format.zig");
 const term_utils = @import("term_utils.zig");
-const pu = @import("parse_utils.zig");
-const wu = @import("write_utils.zig");
-const mu = @import("misc_utils.zig");
-const su = @import("selection_utils.zig");
+const parse_utils = @import("parse_utils.zig");
+const write_utils = @import("write_utils.zig");
+const misc_utils = @import("misc_utils.zig");
+const selection_utils = @import("selection_utils.zig");
 const logging = @import("logging.zig");
 
-// function imports
 pub const std_options = logging.std_options;
 pub const logger = logging.default_logger;
 pub const panic = logging.panic;
 pub const panicFmt = logging.panicFmt;
-const isz = mu.isz;
 
-var file_content: [5 * 1024 * 1024]u8 = undefined;
-var bytes_read: usize = 0;
-pub var lines_read: usize = 0;
-pub var lines: [5 * 1024 * 1024][]const u8 = undefined;
+
 /// index of first visible line
 // var first_line: usize = 0;
-pub const bottom_ui_rows: usize = 4;
+const bottom_ui_rows: usize = 4;
 /// rows reserved for permanent ui
-pub const non_content_rows = bottom_ui_rows;
-/// rows available for file content
-pub var content_rows: usize = undefined;
-/// cols reserved for line number
-pub var non_content_cols: usize = undefined;
+const non_content_rows = bottom_ui_rows;
+const non_content_cols: usize = 5;  // TODO!
 
 /// window dimensions
-var size: term_utils.Size = undefined;
+var size: Size = undefined;
 var tty: fs.File = undefined;
-
-/// minimum lines visible when scrolling past end
-const MIN_LINES_VISIBLE: usize = 1;
 
 // åäö
 // zig run src/mini.zig < src/parse_utils.zig &> mini.log
@@ -50,12 +45,15 @@ const MIN_LINES_VISIBLE: usize = 1;
 // https://ziglang.org/documentation/master/std/#std.posix.poll
 // https://chatgpt.com/share/43543411-1296-4086-990d-0df98b621321
 
-var parse_buf: [1000]u8 = undefined;
-var parse_fbs = std.io.fixedBufferStream(&parse_buf);
-const parse_writer = parse_fbs.writer();
+fn get_writer(buf: []u8) std.io.GenericWriter {
+    var fbs = std.io.fixedBufferStream(&buf);
+    return fbs.writer();
+}
 
 /// tries to match the slice needle to a slice in haystack.
-fn sliceMatch(needle: []const u8, haystack: []const []const u8) bool {
+fn genericMatch(needle: []const u8, haystack: []const []const u8) bool {
+    const zone = tracy.initZone(@src(), .{ .name = "generic match" });
+    defer zone.deinit();
     for (haystack) |straw| {
         if (std.mem.eql(u8, needle, straw)) {
             return true;
@@ -64,15 +62,64 @@ fn sliceMatch(needle: []const u8, haystack: []const []const u8) bool {
     return false;
 }
 
-pub fn main() !void {
-    const ziglang = try treez.Language.get("zig");
+/// return return the pair sorted by row, col
+fn getSortedPoints(A: Point, B: Point) struct { Point, Point } {
+    if (B.row < A.row) return .{ B, A };
+    if (B.row == A.row and B.col < A.col) return .{ B, A };
+    return .{ A, B };
+}
 
+/// strict cmp, bool (A < B)
+fn cmpPoints(A: Point, B: Point) bool {
+    if (B.row < A.row) return false;
+    if (B.row == A.row and B.col <= A.col) return false;
+    return true;
+}
+
+/// is A, B, C sorted?
+/// specifically: is A <= B < C
+fn isBetween(A: Point, B: Point, C: Point) bool {
+    return ((!cmpPoints(B, A)) and cmpPoints(B, C));
+}
+
+/// quit commands
+const q_eq: [3][]const u8 = .{ "ESC", "Q", "q" };
+/// down commands
+const j_eq: [3][]const u8 = .{ "DOWN", "J", "j" };
+/// up commands
+const k_eq: [3][]const u8 = .{ "UP", "K", "k" };
+
+pub const arrows: [4][]const u8 = .{ "UP", "DOWN", "LEFT", "RIGHT" };
+/// move cursor
+const c_arrows: [4][]const u8 = .{ "CTRL+UP", "CTRL+DOWN", "CTRL+LEFT", "CTRL+RIGHT" };
+/// change selection
+const sc_arrows: [4][]const u8 = .{ "SHIFT+CTRL+UP", "SHIFT+CTRL+DOWN", "SHIFT+CTRL+LEFT", "SHIFT+CTRL+RIGHT" };
+/// move cursor fn+arrow
+const c_fn_arrows: [4][]const u8 = .{ "CTRL+PGUP", "CTRL+PGDN", "CTRL+HOME", "CTRL+END" };
+/// change selection fn+arrow
+const sc_fn_arrows: [4][]const u8 = .{ "SHIFT+CTRL+PGUP", "SHIFT+CTRL+PGDN", "SHIFT+CTRL+HOME", "SHIFT+CTRL+END" };
+
+const paste_sel: [1][]const u8 = .{ "CTRL+y" };
+
+const insert_mode: [1][]const u8 = .{"i"};
+
+const normal_mode: [1][]const u8 = .{"ASCII-ESC / ESC / CTRL+8"};
+const undo: [1][]const u8 = .{"CTRL+u"};
+
+
+const Mode = enum {
+    insert,
+    normal
+};
+
+var mode: Mode = .normal;
+
+pub fn main() !void {
+    // tree-sitter init (parses this file, does not integrate with Document yet)
+    const ziglang = try treez.Language.get("zig");
     var parser = try treez.Parser.create();
     defer parser.destroy();
-
     try parser.setLanguage(ziglang);
-    // parser.useStandardLogger();
-
     const inp = @embedFile("mini.zig");
     const tree = try parser.parseString(null, inp);
     defer tree.destroy();
@@ -80,143 +127,196 @@ pub fn main() !void {
     try term_utils.uncook();
     defer term_utils.cook() catch {};
 
-    // Still needed for the rendering; I want to abstract it away
-    // too. Not sure how yet.
+    // Still needed for rendering
     tty = term_utils.tty;
 
     try logging.loggerInit(null);
     defer logging.loggerDeinit();
 
-    try getInp();
-
     size = try getSize();
 
-    // set last visible line
-    moveView(0);
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const alloc = gpa.allocator();
 
-    try render(null);
 
-    var bci = pu.BufferedCmdIterator{ .tty = term_utils.tty };
+    const rope = try doc.openAsRope(alloc, "src/document.zig"); // 6k
+    //const rope = try doc.openAsRope(alloc, "/home/alex/Downloads/data-1717158044627.csv"); // 17M
+    //const rope = try doc.openAsRope(alloc, "/home/alex/Downloads/data-1720544170329.csv"); // 100k
+    // /home/alex/Downloads/data-1717158044627.csv 17M
+
+    defer rope.releaseWithFn(@TypeOf(rope.value.*).deinit);
+    //const vp = doc.ViewPort {.height = size.height-2, .width=size.width-1};
+    var dc = try doc.Document.init(alloc, size.height-non_content_rows, size.width-4, rope);
+
+    {
+        const txt = try dc.getText();
+        try render(&.{}, dc.cursor, txt, dc.render_buffer.viewport);
+    }
+
+    var bci = parse_utils.BufferedCmdIterator{ .tty = term_utils.tty };
 
     while (true) {
         const cmd_full = try bci.next();
         const cmd = cmd_full.raw_cmd;
         const cmd2 = cmd_full.parsed_cmd;
 
-        logger.debug("single cmd, raw: {any} ({s}), parsed: {any} ({s})", .{ cmd, cmd, cmd2, cmd2 });
-        blk: {
-            var move_view = false;
-            if (sliceMatch(cmd2, &su.q_eq)) {
-                logger.debug("input case q, quit", .{});
+        {
+            const zone = tracy.initZone(@src(), .{ .name = "Handling command" });
+            defer zone.deinit();
+
+            //const txt_old = try dc.getText();
+            print("\n single cmd {any}\n", .{cmd});
+
+            if (genericMatch(cmd2, &q_eq)) {
                 return;
-            } else if (sliceMatch(cmd2, &su.j_eq)) {
-                logger.debug("input case j, move view", .{});
+            } else if (genericMatch(cmd2, &j_eq)) {
                 // next line
-                moveView(1);
-            } else if (sliceMatch(cmd2, &su.k_eq)) {
-                logger.debug("input case k, move view", .{});
+                dc.moveView(1);
+            } else if (genericMatch(cmd2, &k_eq)) {
                 // previous line
-                moveView(-1);
-            } else if (sliceMatch(cmd2, &su.c_arrows)) {
-                logger.debug("input case ctrl+arrow, move cursor", .{});
+                dc.moveView(-1);
+            } else if (genericMatch(cmd2, &c_arrows)) {
                 // ctrl+arrow, move cursor
-                move_view = true;
-                su.movePt(su.matchDirSuffix(cmd2) catch break :blk, false, false, &su.cursor);
-            } else if (sliceMatch(cmd2, &su.sc_arrows)) {
-                logger.debug("input case shift+ctrl+arrow, move cursor & selection", .{});
+                //  move cursor
+                dc.moveCursor(@enumFromInt(@intFromEnum(try selection_utils.matchDirSuffix(cmd2))));
+                // reset selection
+                dc.cursor.selection = Selection.emptySel(dc.cursor.pos);
+            } else if (genericMatch(cmd2, &sc_arrows)) {
                 // shift+ctrl+arrow, move cursor & selection
-                move_view = true;
-                su.movePt(su.matchDirSuffix(cmd2) catch break :blk, true, false, &su.cursor);
-            } else if (sliceMatch(cmd2, &su.fn_arrows)) {
-                logger.debug("input case fn+arrow, move view", .{});
-                // fn+arrow, move view
-                switch (su.matchDirSuffix(cmd2) catch break :blk) {
-                    su.Direction.up => moveView(isz(content_rows - 1)),
-                    su.Direction.down => moveView(isz(content_rows - 1)),
-                    else => {},
+                // move cursor
+                dc.moveCursor(@enumFromInt(@intFromEnum(try selection_utils.matchDirSuffix(cmd2))));
+                // update selection
+                dc.cursor.selection.head = dc.cursor.pos;
+            } else if (genericMatch(cmd2, &paste_sel)) {
+                try dc.pasteSelection();
+            } else if (genericMatch(cmd2, &undo)) {
+                dc.undo();
+            } else if (genericMatch(cmd2, &c_fn_arrows)) {
+                // ctrl+arrow, move cursor
+                // move cursor
+                const Case = enum { PGUP, PGDN, HOME, END };
+                const case = std.meta.stringToEnum(Case, cmd2[5..]);
+                if (case) |case_| {
+                    switch (case_) {
+                        .PGUP => dc.cursorPgUp(),
+                        .PGDN => dc.cursorPgDn(),
+                        .HOME => dc.cursorHome(),
+                        .END => dc.cursorEnd(),
+                    }
                 }
-            } else if (sliceMatch(cmd2, &su.c_fn_arrows)) {
-                logger.debug("input case ctrl+fn+arrow, move cursor", .{});
-                // ctrl+fn+arrow, move cursor
-                move_view = true;
-                su.movePt(su.matchDirSuffix(cmd2) catch break :blk, false, true, &su.cursor);
-            } else if (sliceMatch(cmd2, &su.sc_fn_arrows)) {
-                logger.debug("input case shift+ctrl+fn+arrow, move cursor & selection", .{});
-                // shift+ctrl+fn+arrow, move cursor & selection
-                move_view = true;
-                su.movePt(su.matchDirSuffix(cmd2) catch break :blk, true, true, &su.cursor);
+            } else if (genericMatch(cmd2, &sc_fn_arrows)) {
+                // shift+ctrl+arrow, move cursor & selection
+                // move cursor
+                const Case = enum { PGUP, PGDN, HOME, END };
+                const case = std.meta.stringToEnum(Case, cmd2[11..]);
+                if (case) |case_| {
+                    switch (case_) {
+                        .PGUP => dc.cursorPgUp(),
+                        .PGDN => dc.cursorPgDn(),
+                        .HOME => dc.cursorHome(),
+                        .END => dc.cursorEnd(),
+                    }
+                    // update selection (TODO)!
+                    dc.cursor.selection.head = dc.cursor.pos;
+                }
             }
-            if (move_view) {
-                const t_row = su.cursor.pos.row;
-                if (t_row >= view.lst) moveView(isz(t_row - view.lst) + 1) else if (t_row < view.fst) moveView(isz(t_row) - isz(view.fst));
+            else if (mode == .normal and genericMatch(cmd2, &insert_mode)) {
+                mode = .insert;
+            } else if (mode == .insert and genericMatch(cmd2, &normal_mode)) {
+                mode = .normal;
+            } else if (mode == .insert) {
+                try dc.insertAtCursor(cmd2);
             }
         }
 
-        try render(cmd);
+        {
+            const zone_print = tracy.initZone(@src(), .{ .name = "print" });
+            defer zone_print.deinit();
+            print("\nAfter handling commands: dc.vp: {}\n", .{ dc.render_buffer.viewport});
+            print("Cursor: {}\n\n", .{dc.cursor});
+        }
+        //try dc.render_buffer.resize(vp);
+        const txt = b: {
+            const zone_txt = tracy.initZone(@src(), .{ .name = "Getting text" });
+            defer zone_txt.deinit();
+            break :b try dc.getText();
+        };
+        //try render(&.{}, dc.cursor, txt, vp);
+        {
+            const zone_rndr = tracy.initZone(@src(), .{ .name = "Rendering" });
+            defer zone_rndr.deinit();
+            try render(cmd, dc.cursor, txt, dc.render_buffer.viewport);
+        }
     }
 }
 
 /// render the current view
-fn render(maybe_bytes: ?[]const u8) !void {
+fn render(maybe_bytes: ?[]const u8, cursor: Cursor, lns: [] const doc.LineSlice, view: doc.ViewPort) !void {
     const tty_writer = tty.writer();
     var buf_writer = std.io.bufferedWriter(tty_writer);
     const writer = buf_writer.writer();
 
     try clear(writer);
-    non_content_cols = 2 + mu.numDigits(lines_read);
 
-    try render_line_numbers(writer);
-    try render_file_content(writer);
-    try render_sel(writer);
-    try render_cursor(writer);
-    try render_bottom_ui(maybe_bytes, writer);
+    for (lns, 0..) |line, i| {
+        try writeLine(writer, line.line, i);
+    }
+    try render_line_numbers(writer, view);
+
+    //try renderLines(writer);
+    try render_sel(writer, cursor, view, lns);
+    try render_cursor(writer, cursor, view, lns);
+    try render_bottom_ui(maybe_bytes, writer, cursor, view);
     _ = &maybe_bytes;
 
     try buf_writer.flush();
 }
 
-/// render file content
-fn render_file_content(writer: anytype) !void {
-    // const last_line: usize = @min(first_line + content_rows, lines_read);
-    const first_line = view.fst;
-    const last_line = view.lst;
-    for (first_line..last_line) |line_ind| {
-        try writeLine(writer, lines[line_ind], line_ind - first_line);
-    }
-}
-
 // render the line numbers
-fn render_line_numbers(writer: anytype) !void {
-    const first_line = view.fst;
-    const last_line = view.lst;
+fn render_line_numbers(writer: anytype, view: doc.ViewPort) !void {
+    const first_line = view.start.row;
+    const last_line = view.start.row+view.height;
+    //non_content_cols = 2 + misc_utils.numDigits(last_line); // TODO!!!
     for (first_line..last_line) |line_ind| {
-        const pad_slice = mu.spaces[0..(non_content_cols - mu.numDigits(line_ind) - 1)];
+        const pad_slice = misc_utils.spaces[0..(non_content_cols - misc_utils.numDigits(line_ind) - 1)];
         try moveCursor(writer, line_ind - first_line, 0);
         try writer.print("{s}{d}", .{ pad_slice, line_ind });
     }
-    for (last_line..(view.fst + content_rows)) |line_ind| {
-        const pad_slice = mu.spaces[0..(non_content_cols - 2)];
+    for (last_line..(view.start.row + view.height)) |line_ind| {
+        const pad_slice = misc_utils.spaces[0..(non_content_cols - 2)];
         try moveCursor(writer, line_ind - first_line, 0);
         try writer.print("{s}~", .{pad_slice});
     }
 }
 
+// /// render file content
+// fn render_file_content(writer: anytype) !void {
+//     // const last_line: usize = @min(first_line + content_rows, lines_read);
+//     const first_line = view.fst;
+//     const last_line = view.start.row+view.height;
+//     for (first_line..last_line) |line_ind| {
+//         try writeLine(writer, lines[line_ind], line_ind - first_line);
+//     }
+// }
+
 /// render bottom ui
-fn render_bottom_ui(maybe_bytes: ?[]const u8, arg_writer: anytype) !void {
+fn render_bottom_ui(maybe_bytes: ?[]const u8, arg_writer: anytype, cursor: Cursor, view: doc.ViewPort) !void {
     // var rawbuf
-    var multi_writer = wu.multiWriter(arg_writer);
+    var multi_writer = write_utils.multiWriter(arg_writer);
     const writer = multi_writer.writer();
     // input?
     if (maybe_bytes) |bytes| {
         // input given
         // raw input row
         try moveCursor(writer, size.height - 2, 0);
+        try writer.print("\x1B[46m", .{});
         try writer.writeAll("Raw input:       ");
-        try pu.rawWrite(bytes, writer);
+        try parse_utils.rawWrite(bytes, writer);
         // parsed input row
         try moveCursor(writer, size.height - 1, 0);
         try writer.writeAll("Parsed input:    ");
-        try pu.parseWrite(bytes, writer);
+        try parse_utils.parseWrite(bytes, writer);
+        try writer.print("\x1B[49m", .{});
     } else {
         // no input
         try moveCursor(writer, size.height - 2, 0);
@@ -224,80 +324,80 @@ fn render_bottom_ui(maybe_bytes: ?[]const u8, arg_writer: anytype) !void {
     }
     // status row
     try moveCursor(writer, size.height - 3, 0);
-    try writer.print("{any}", .{su.cursor.sel});
+    try writer.print("\x1B[45m", .{});
+    try writer.print("MODE: {s:>6}", .{@tagName(mode)});
+    try writer.print("\x1B[47m", .{});
+    try writer.print(" selection anchor {any: >3}   head {any: >3}", .{
+        cursor.selection.anchor, cursor.selection.head });
     try moveCursor(writer, size.height - 4, 0);
-    try writer.print("view {any}" ++ " " ** 40 ++ "cursor {any} (move using CTRL+<arrow>)", .{ view, su.cursor.pos });
+    try writer.print("view {any: >3}   cursor {any: >3} (move using CTRL+<arrow>)", .{ view, cursor.pos });
+    try writer.print("\x1B[49m", .{});
 }
 
-fn render_sel(writer: anytype) !void {
-    // logger.debug("render_sel selection {any}", .{su.cursor.sel});
-    // logger.debug("render_sel view.fst {} view.lst {}", .{ view.fst, view.lst });
-    var min_p, var max_p = su.getSortedPoints(su.cursor.sel.anchor, su.cursor.sel.head);
-    // logger.debug("min_p {any} max_p {any}", .{ min_p, max_p });
-    // limit ourselves to the visible part of the selection
-    min_p = su.maxPt(min_p, su.point(view.fst, 0));
-    // limit ourselves to the visible part of the selection
-    max_p = su.minPt(max_p, su.point(view.lst, 0));
-    // logger.debug("min_p {any} max_p {any}", .{ min_p, max_p });
+fn render_sel(writer: anytype, cursor: Cursor, view: doc.ViewPort, lns: []const doc.LineSlice) !void {
+    const min_p, const max_p = getSortedPoints(cursor.selection.anchor, cursor.selection.head);
     const min_r = min_p.row;
     const max_r = max_p.row;
     // var max_c: usize = undefined;
     // for (min_r..(max_r + 1)) |row_i| max_c = @max(max_c, lines[row_i].len);
     // if (max_r <= min_r) return;
-    // logger.debug("min_r {any} max_r {any}", .{ min_r, max_r });
-    if (min_r <= max_r) {
-        for (min_r..(max_r + 1)) |row_i| {
-            if (row_i < view.fst or view.lst <= row_i) continue;
-            const line = lines[row_i];
-            for (0..line.len, line) |col_i, ch| {
-                if (su.isBetween(min_p, su.point(row_i, col_i), max_p)) {
-                    try moveCursor(writer, row_i - view.fst, col_i + non_content_cols);
-                    // underline
-                    try writer.writeAll("\x1B[4m");
-                    // invert
-                    try writer.writeAll("\x1B[7m");
-                    var byte = ch;
-                    if (byte < 32 or byte > 126) byte = ' ';
-                    try writer.writeByte(byte);
-                    try writer.writeAll("\x1B[0m");
-                }
+    for (min_r..(max_r + 1)) |row_i| {
+        if (row_i < view.start.row or view.start.row+view.height <= row_i) continue;
+        const rel_row_i = row_i - view.start.row;
+        if (rel_row_i >= lns.len) continue;
+        const line: doc.LineSlice = lns[rel_row_i];
+
+        // TODO the below is only correct for col==0
+        std.debug.assert(view.start.col==0);
+        for (0..line.line.len, line.line) |col_i, ch| {
+            if (isBetween(min_p, .{.row=row_i, .col=col_i}, max_p)) {
+                try moveCursor(writer, row_i - view.start.row, col_i+non_content_cols);
+                // underline
+                try writer.writeAll("\x1B[4m");
+                // invert
+                try writer.writeAll("\x1B[7m");
+                var byte = ch;
+                if (byte < 32 or byte > 126) byte = ' ';
+                try writer.writeByte(byte);
+                try writer.writeAll("\x1B[0m");
             }
         }
     }
-
-    // logger.debug("rendel_sel end", .{});
 }
 
-fn render_cursor(writer: anytype) !void {
-    const row = su.cursor.pos.row;
-    const col = su.cursor.pos.col;
-    // if su.cursor.pos
-    if (view.fst <= row and row < view.lst) {
-        try moveCursor(writer, row - view.fst, col + non_content_cols);
-        // blink
-        try writer.writeAll("\x1B[5m");
+fn render_cursor(writer: anytype, cursor: Cursor, view: doc.ViewPort, lns: []const doc.LineSlice) !void {
+    const row = cursor.pos.row;
+    const col = cursor.pos.col;
+    // if cursor.pos
+    if (view.start.row <= row and row < view.start.row+view.height) {
+        if (row-view.start.row >= lns.len) return;
+        try moveCursor(writer, row - view.start.row, col+non_content_cols);
+        // // white bg
+        // try writer.writeAll("\x1B[47m");
         // reverse fg/bg
         try writer.writeAll("\x1B[7m");
-        // if part of selection, underline
-        if (su.isBetween(su.cursor.sel.anchor, su.cursor.pos, su.cursor.sel.head) or su.isBetween(su.cursor.sel.head, su.cursor.pos, su.cursor.sel.anchor)) {
-            // underline
-            try writer.writeAll("\x1B[4m");
-        }
-        var byte: u8 = ' ';
-        if (col < lines[row].len) byte = lines[row][col];
+        // blink
+        try writer.writeAll("\x1B[5m");
+        // try writer.writeAll(" ");
+
+        // TODO fix so it works without the condition:
+        std.debug.assert(view.start.col == 0);
+        const line = lns[row-view.start.row].line;
+        //if (col >= line.len)
+        var byte = if (col < line.len) line[col] else 0;
         if (byte < 32 or byte > 126) byte = ' ';
         try writer.writeByte(byte);
         try writer.writeAll("\x1B[0m");
     }
 }
 
-/// write slice to the buffer at row y col 0, applying format.myFmtLine
+/// write <txt> to the buffer at row y col 0, applying format.myFmtLine
 fn writeLine(writer: anytype, txt: []const u8, y: usize) !void {
     try moveCursor(writer, y, non_content_cols);
     try writer.print("{}", .{format.myFmtLine(txt)});
 }
 
-/// move the su.cursor to row, col, using 0-indexing
+/// move the cursor to row, col, using 0-indexing
 fn moveCursor(writer: anytype, row: usize, col: usize) !void {
     try writer.print("\x1B[{};{}H", .{ row + 1, col + 1 });
 }
@@ -307,54 +407,21 @@ fn clear(writer: anytype) !void {
     try writer.writeAll("\x1B[2J");
 }
 
-/// read file content from stdin.
-/// raise exception if longer than 5 MB.
-fn getInp() !void {
-    const stdin = std.io.getStdIn().reader();
-    bytes_read = try stdin.readAll(&file_content);
-    if (bytes_read == file_content.len) panicFmt("getInp file too long, at least {} bytes", .{bytes_read});
-    var split_it = std.mem.splitSequence(u8, file_content[0..bytes_read], "\n");
-    while (split_it.next()) |line| {
-        lines[lines_read] = line;
-        lines_read += 1;
+const Size = struct { width: usize, height: usize };
+/// get the window size
+fn getSize() !Size {
+    var win_size = mem.zeroes(linux.winsize);
+    if (linux.ioctl(tty.handle, linux.T.IOCGWINSZ, @intFromPtr(&win_size)) != 0) {
+        @panic("getsize failed ioctl()");
     }
-}
-/// first line, last line. lst not visible
-pub const View = struct {
-    fst: usize = 0,
-    lst: usize = 0,
-    pub fn format(
-        self: *const @This(),
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        _ = fmt;
-        _ = options;
-
-        try writer.print("view ( {d: >4}, {d: >4} )", .{ self.fst, self.lst });
-    }
-};
-/// lst is not invisible
-pub var view: View = .{};
-/// can be called with any valid isize
-pub fn moveView(ind: isize) void {
-    logger.debug("moveView(ind: {any})", .{ind});
-    if (ind > 0) {
-        view.fst += @min(@abs(ind), lines_read - view.fst - @min(MIN_LINES_VISIBLE, lines_read));
-    } else if (ind < 0) {
-        // const abs: usize = ind;
-        view.fst -= @min(@abs(ind), view.fst);
-    }
-    view.lst = @min(lines_read, view.fst + content_rows);
-    if (view.lst <= view.fst or view.lst > lines_read) panicFmt("moveView caused invalid view {any}\n", .{view});
-}
-
-fn getSize() !term_utils.Size {
-    const res = try term_utils.getSize();
-    if (res.height < non_content_rows) unreachable;
-    content_rows = res.height - non_content_rows;
-    return res;
+    const height: usize = win_size.ws_row;
+    // update number of rows available for content
+    if (height < non_content_rows) unreachable;
+    //const content_rows = win_size.ws_row - non_content_rows;
+    return Size{
+        .height = win_size.ws_row,
+        .width = win_size.ws_col,
+    };
 }
 
 // this seems to ensure all tests are run

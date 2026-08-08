@@ -145,6 +145,17 @@ pub fn build(b: *std.Build) void {
     addDeps(exe_unit_tests, b);
     addDeps(lib_unit_tests, b);
 
+    // mini.zig imports document.zig (which imports rope) and tracy
+    lib_unit_tests.root_module.addImport("rope", rope_mod);
+    lib_unit_tests.root_module.addImport("tracy", tracy.module("tracy"));
+    lib_unit_tests.linkLibrary(tracy.artifact("tracy"));
+    lib_unit_tests.linkLibCpp();
+
+    exe_unit_tests.root_module.addImport("rope", rope_mod);
+    exe_unit_tests.root_module.addImport("tracy", tracy.module("tracy"));
+    exe_unit_tests.linkLibrary(tracy.artifact("tracy"));
+    exe_unit_tests.linkLibCpp();
+
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
 
     // should make all tests run all the time
