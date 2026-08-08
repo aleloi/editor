@@ -1,26 +1,35 @@
 {
   inputs = {
     nixpkgs.url  = "github:NixOS/nixpkgs";
-    zig-overlay = {
-      url = "github:mitchellh/zig-overlay";
-    };
   };
 
-  outputs = {self, zig-overlay, nixpkgs, ... }:
+  outputs = {self, nixpkgs, ... }:
   let
-    pkgs = import nixpkgs {
-      overlays = [zig-overlay.overlays.default ];
-      system = "x86_64-linux";
-    };
+    systems = [
+      "x86_64-linux"
+      "aarch64-linux"
+      "x86_64-darwin"
+      "aarch64-darwin"
+    ];
+    forAllSystems = nixpkgs.lib.genAttrs systems;
+    nixpkgsFor = system: import nixpkgs { inherit system; };
   in
     {
-      devShell.x86_64-linux = pkgs.mkShell {
-        nativeBuildInputs = [
-          zig-overlay.packages."x86_64-linux"."0.13.0"
-          pkgs.tracy
-          pkgs.seer
-          # pkgs
-        ];
-      };
+      devShells = forAllSystems (system:
+        let
+          pkgs = nixpkgsFor system;
+        in
+          {
+            default = pkgs.mkShell {
+              nativeBuildInputs = [
+                pkgs.zig_0_16
+                pkgs.zls
+                pkgs.tracy
+                pkgs.seer
+                pkgs.tmux
+              ];
+            };
+          }
+      );
     };
 }
