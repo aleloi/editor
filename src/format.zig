@@ -1,67 +1,59 @@
 //! formatting printable/unprintable chars
 const std = @import("std");
+const Writer = std.Io.Writer;
 
 const WIDTH: usize = 100;
 
-fn formatFn(
-    bytes: []const u8,
-    comptime f: []const u8,
-    options: std.fmt.FormatOptions,
-    writer: anytype,
-) !void {
-    _ = options;
-    _ = f;
-
-    for (bytes[0..@min(bytes.len, WIDTH - 1)]) |byte| {
-        if (byte >= 32 and byte <= 126) {
-            try writer.writeByte(byte);
-        } else {
-            try writer.writeAll("\x1B[41m");
+pub const MyFmtLine = struct {
+    data: []const u8,
+    pub fn format(s: @This(), writer: *Writer) Writer.Error!void {
+        for (s.data[0..@min(s.data.len, WIDTH - 1)]) |byte| {
+            if (byte >= 32 and byte <= 126) {
+                try writer.writeByte(byte);
+            } else {
+                try writer.writeAll("\x1B[41m");
+                try writer.writeAll(" ");
+                try writer.writeAll("\x1B[0m");
+            }
+        }
+        if (s.data.len >= WIDTH) {
+            try writer.writeAll("\x1B[42m");
             try writer.writeAll(" ");
             try writer.writeAll("\x1B[0m");
         }
     }
-    if (bytes.len >= WIDTH) {
-        try writer.writeAll("\x1B[42m");
-        try writer.writeAll(" ");
-        try writer.writeAll("\x1B[0m");
-    }
-}
+};
 
 /// format printable chars unchanged
 /// otherwise space with red background
 /// if bytes is longer than WIDTH,
 /// truncate and mark with space
 /// with green background
-pub fn myFmtLine(bytes: []const u8) std.fmt.Formatter(formatFn) {
+pub fn myFmtLine(bytes: []const u8) MyFmtLine {
     return .{ .data = bytes };
 }
 
-fn formatUnreadableByte(
-    bytes: []const u8,
-    comptime f: []const u8,
-    options: std.fmt.FormatOptions,
-    writer: anytype,
-) !void {
-    _ = options;
-    _ = f;
-    for (bytes) |byte| {
-        try writer.writeAll("\"");
-        defer writer.writeAll("\" ") catch {};
-        switch (byte) {
-            // unprintable ascii
-            0...31, 127 => try writer.print("\\x{X:0>2}", .{byte}),
-            // printable ascii
-            32...126 => try writer.writeByte(byte),
-            // non-ascii (including 128...255)
-            else => try writer.print("non-ASCII \\x{X:0>2}", .{byte}),
+pub const MyFmtBytes = struct {
+    data: []const u8,
+    pub fn format(s: @This(), writer: *Writer) Writer.Error!void {
+        for (s.data) |byte| {
+            try writer.writeAll("\"");
+            defer writer.writeAll("\" ") catch {};
+            switch (byte) {
+                // unprintable ascii
+                0...31, 127 => try writer.print("\\x{X:0>2}", .{byte}),
+                // printable ascii
+                32...126 => try writer.writeByte(byte),
+                // non-ascii (including 128...255)
+                else => try writer.print("non-ASCII \\x{X:0>2}", .{byte}),
+            }
         }
     }
-}
+};
 
 /// format printable chars unchanged
 /// otherwise print hex
-pub fn myFmtBytes(bytes: []const u8) std.fmt.Formatter(formatUnreadableByte) {
+pub fn myFmtBytes(bytes: []const u8) MyFmtBytes {
     return .{ .data = bytes };
 }
 

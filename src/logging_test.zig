@@ -1,8 +1,8 @@
-// const std = @import("std");
+const std = @import("std");
 const logging = @import("logging.zig");
 const logger = logging.default_logger;
 pub const std_options = logging.std_options;
-pub const panic = logging.panic;
+pub const panic = std.debug.FullPanic(logging.panic);
 
 fn f1() void {
     logger.debug("f1 called!", .{});

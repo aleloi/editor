@@ -159,10 +159,10 @@ pub const Document = struct {
     pub fn init(alloc: std.mem.Allocator, h: usize, w: usize, rp: RopeRc) !Document {
         const vp = ViewPort {.height = h, .width=w};
         var res: Document = .{.alloc=alloc,
-                              .history=std.ArrayList(RopeRc).init(alloc),
+                              .history=.empty,
                               .render_buffer = try RenderBuffer.init(alloc, vp)};
         var rope_v = rp;
-        try res.history.append(rope_v.retain());
+        try res.history.append(alloc, rope_v.retain());
         return res;
     }
 
@@ -170,7 +170,7 @@ pub const Document = struct {
         for (self.history.items) |itm| {
             itm.releaseWithFn(rope.Node.deinit);
         }
-        self.history.deinit();
+        self.history.deinit(self.alloc);
         self.render_buffer.deinit();
     }
 
@@ -281,7 +281,7 @@ pub const Document = struct {
             last.value.*.posToOffset(pos) catch last.value.*.agg.num_bytes);
         errdefer res.releaseWithFn(Rope.deinit);
 
-        try self.history.append(res);
+        try self.history.append(self.alloc, res);
         self.cursor.forwardByAgg(to_insert.value.*.agg);
     }
 
@@ -327,7 +327,7 @@ pub const Document = struct {
             last.value.*.posToOffset(self.cursor.pos) catch last.value.*.agg.num_bytes);
         errdefer res.releaseWithFn(Rope.deinit);
 
-        try self.history.append(res);
+        try self.history.append(self.alloc, res);
         self.cursor.forwardByAgg(begin_to_end.value.*.agg);
     }
 
@@ -382,20 +382,22 @@ pub const Document = struct {
 };
 
 
-pub fn openAsRope(alloc: std.mem.Allocator, rel_fname: [] const u8) !RopeRc {
+pub fn openAsRope(alloc: std.mem.Allocator, rel_fname: [] const u8, io: std.Io) !RopeRc {
     //std.debug.print("AAAaaaa\n", .{});
-    const dir: std.fs.Dir = std.fs.cwd();
+    const dir = std.Io.Dir.cwd();
 
     //var path_buf: [1000] u8 = undefined;
     //const slice = try dir.realpath(rel_fname, &path_buf);
     //std.debug.print("abs path is: {s}\n", .{slice});
 
-    const fl: std.fs.File = try dir.openFile(rel_fname, .{});
-    defer fl.close();
+    const fl: std.Io.File = try dir.openFile(io, rel_fname, .{});
+    defer fl.close(io);
 
     //fl.writer();
 
-    const buf: []const u8 = try fl.readToEndAlloc(alloc, 20_000_000);
+    var reader_buf: [4096]u8 = undefined;
+    var reader = std.Io.File.Reader.init(fl, io, &reader_buf);
+    const buf: []const u8 = try reader.interface.allocRemaining(alloc, .limited(20_000_000));
     defer alloc.free(buf);
 
     return try Rope.fromSlice(buf);
@@ -403,13 +405,13 @@ pub fn openAsRope(alloc: std.mem.Allocator, rel_fname: [] const u8) !RopeRc {
 
 
 test "rope from this file test" {
-    const rp = try openAsRope(std.testing.allocator, "src/document.zig");
+    const rp = try openAsRope(std.testing.allocator, "src/document.zig", std.Options.debug_io);
     defer rp.releaseWithFn(Rope.deinit);
 }
 
 
 test "create doc test no leaks" {
-    const rp = try openAsRope(std.testing.allocator, "src/document.zig");
+    const rp = try openAsRope(std.testing.allocator, "src/document.zig", std.Options.debug_io);
     defer rp.releaseWithFn(Rope.deinit);
 
     var doc = try Document.init(std.testing.allocator, 10, 20, rp);
@@ -417,7 +419,7 @@ test "create doc test no leaks" {
 }
 
 test "get text test ocular inspection" {
-    const rp = try openAsRope(std.testing.allocator, "src/document.zig");
+    const rp = try openAsRope(std.testing.allocator, "src/document.zig", std.Options.debug_io);
     defer rp.releaseWithFn(Rope.deinit);
 
     var doc = try Document.init(std.testing.allocator, 10, 20, rp);

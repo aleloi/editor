@@ -7,6 +7,7 @@
 //! concatenation) return new ropes that may have internal shared
 //! pointers pointing to the input ropes.
 const std = @import("std");
+const BoundedArray = @import("bounded_array.zig").BoundedArray;
 
 // https://github.com/Aandreba/zigrc. Currently using single-threaded
 // Rc. Guard refcount-changing operations with a lock if doing
@@ -31,25 +32,20 @@ pub const Pos = struct {
     }
 
     pub fn format(
-        self: *const @This(),
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        _ = fmt;
-        _ = options;
-
+        self: @This(),
+        writer: *std.Io.Writer,
+    ) std.Io.Writer.Error!void {
         try writer.print("( {d: >4}, {d: >4} )", .{ self.row, self.col });
     }
 };
 
 fn panicAndExit(info: []const u8, extra: anytype) noreturn {
     std.debug.print("{s} {any}", .{ info, extra });
-    std.debug.dumpCurrentStackTrace(null);
+    std.debug.dumpCurrentStackTrace(.{});
     std.process.exit(1);
 }
 
-var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+var gpa = std.heap.DebugAllocator(.{}){};
 const gpa_alloc = gpa.allocator();
 
 /// Standard node side (TODO it's supposed to perform better when
@@ -142,7 +138,7 @@ pub fn NodeBF(branch_factor: comptime_int,
             break :blk std.math.log_int(usize, BRANCH_FACTOR, maxFileSizeBytes / LEAF_SIZE) + 3;
         };
 
-        const Leaf = std.BoundedArray(u8, LEAF_SIZE);
+        const Leaf = BoundedArray(u8, LEAF_SIZE);
         const Inner = RcArray(BRANCH_FACTOR);
 
         agg: AggregateStats,
@@ -162,7 +158,7 @@ pub fn NodeBF(branch_factor: comptime_int,
             /// over a tree deeper than that. Should actually be quite
             /// safe, as MAX_DEPTH is enough for a tree holding a
             /// couple TB.
-            rec_stack: std.BoundedArray(struct { node: *const Self, kid_index: usize }, MAX_DEPTH),
+            rec_stack: BoundedArray(struct { node: *const Self, kid_index: usize }, MAX_DEPTH),
 
             /// Next byte or null if it has reached the end.
             pub fn next(self: *@This()) ?u8 {
@@ -436,7 +432,7 @@ pub fn NodeBF(branch_factor: comptime_int,
         /// refcounts. Increases on push, decreases on pop.
         fn RcArray(sz: usize) type {
             return struct {
-                arr: std.BoundedArray(RcSelf, sz) = .{},
+                arr: BoundedArray(RcSelf, sz) = .{},
 
                 fn fromSlice(kids: []const RcSelf) !@This() {
                     var res: @This() = .{};

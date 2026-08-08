@@ -1,6 +1,4 @@
 const std = @import("std");
-const fs = std.fs;
-const io = std.io;
 const mem = std.mem;
 const linux = std.os.linux;
 const print = std.debug.print;
@@ -24,7 +22,7 @@ const logging = @import("logging.zig");
 
 pub const std_options = logging.std_options;
 pub const logger = logging.default_logger;
-pub const panic = logging.panic;
+pub const panic = std.debug.FullPanic(logging.panic);
 pub const panicFmt = logging.panicFmt;
 
 
@@ -37,18 +35,13 @@ const non_content_cols: usize = 5;  // TODO!
 
 /// window dimensions
 var size: Size = undefined;
-var tty: fs.File = undefined;
+var tty: std.Io.File = undefined;
 
 // åäö
 // zig run src/mini.zig < src/parse_utils.zig &> mini.log
 // zig run src/mini.zig -O ReleaseFast < src/parse_utils.zig &> mini.log
 // https://ziglang.org/documentation/master/std/#std.posix.poll
 // https://chatgpt.com/share/43543411-1296-4086-990d-0df98b621321
-
-fn get_writer(buf: []u8) std.io.GenericWriter {
-    var fbs = std.io.fixedBufferStream(&buf);
-    return fbs.writer();
-}
 
 /// tries to match the slice needle to a slice in haystack.
 fn genericMatch(needle: []const u8, haystack: []const []const u8) bool {
@@ -114,7 +107,9 @@ const Mode = enum {
 
 var mode: Mode = .normal;
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    term_utils.app_io = init.io;
+
     // tree-sitter init (parses this file, does not integrate with Document yet)
     const ziglang = try treez.Language.get("zig");
     var parser = try treez.Parser.create();
@@ -135,11 +130,11 @@ pub fn main() !void {
 
     size = try getSize();
 
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     const alloc = gpa.allocator();
 
 
-    const rope = try doc.openAsRope(alloc, "src/document.zig"); // 6k
+    const rope = try doc.openAsRope(alloc, "src/document.zig", init.io); // 6k
     //const rope = try doc.openAsRope(alloc, "/home/alex/Downloads/data-1717158044627.csv"); // 17M
     //const rope = try doc.openAsRope(alloc, "/home/alex/Downloads/data-1720544170329.csv"); // 100k
     // /home/alex/Downloads/data-1717158044627.csv 17M
@@ -154,6 +149,7 @@ pub fn main() !void {
     }
 
     var bci = parse_utils.BufferedCmdIterator{ .tty = term_utils.tty };
+    bci.tty_reader = std.Io.File.Reader.init(bci.tty, term_utils.app_io, &bci.reader_buf);
 
     while (true) {
         const cmd_full = try bci.next();
@@ -252,9 +248,7 @@ pub fn main() !void {
 
 /// render the current view
 fn render(maybe_bytes: ?[]const u8, cursor: Cursor, lns: [] const doc.LineSlice, view: doc.ViewPort) !void {
-    const tty_writer = tty.writer();
-    var buf_writer = std.io.bufferedWriter(tty_writer);
-    const writer = buf_writer.writer();
+    const writer = &term_utils.tty_writer.interface;
 
     try clear(writer);
 
@@ -269,7 +263,7 @@ fn render(maybe_bytes: ?[]const u8, cursor: Cursor, lns: [] const doc.LineSlice,
     try render_bottom_ui(maybe_bytes, writer, cursor, view);
     _ = &maybe_bytes;
 
-    try buf_writer.flush();
+    try writer.flush();
 }
 
 // render the line numbers
@@ -300,10 +294,7 @@ fn render_line_numbers(writer: anytype, view: doc.ViewPort) !void {
 // }
 
 /// render bottom ui
-fn render_bottom_ui(maybe_bytes: ?[]const u8, arg_writer: anytype, cursor: Cursor, view: doc.ViewPort) !void {
-    // var rawbuf
-    var multi_writer = write_utils.multiWriter(arg_writer);
-    const writer = multi_writer.writer();
+fn render_bottom_ui(maybe_bytes: ?[]const u8, writer: anytype, cursor: Cursor, view: doc.ViewPort) !void {
     // input?
     if (maybe_bytes) |bytes| {
         // input given
@@ -410,17 +401,17 @@ fn clear(writer: anytype) !void {
 const Size = struct { width: usize, height: usize };
 /// get the window size
 fn getSize() !Size {
-    var win_size = mem.zeroes(linux.winsize);
+    var win_size = mem.zeroes(std.posix.winsize);
     if (linux.ioctl(tty.handle, linux.T.IOCGWINSZ, @intFromPtr(&win_size)) != 0) {
         @panic("getsize failed ioctl()");
     }
-    const height: usize = win_size.ws_row;
+    const height: usize = win_size.row;
     // update number of rows available for content
     if (height < non_content_rows) unreachable;
     //const content_rows = win_size.ws_row - non_content_rows;
     return Size{
-        .height = win_size.ws_row,
-        .width = win_size.ws_col,
+        .height = win_size.row,
+        .width = win_size.col,
     };
 }
 

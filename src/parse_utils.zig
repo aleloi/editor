@@ -44,7 +44,9 @@ const ParseResult = struct {
 pub const BufferedCmdIterator = struct {
     buf: [4096]u8 = undefined,
     parse_buf: [32]u8 = undefined,
-    tty: std.fs.File,
+    reader_buf: [4096]u8 = undefined,
+    tty: std.Io.File,
+    tty_reader: std.Io.File.Reader = undefined,
 
     cmd_it: InputSeqIterator = .{.bytes = &.{}},
 
@@ -68,7 +70,7 @@ pub const BufferedCmdIterator = struct {
         if (self.cmd_it.bytes.len == 0) {
             try self.waitForInput();
 
-            const n = try self.tty.read(&self.buf);
+            const n = try self.tty_reader.interface.readSliceShort(&self.buf);
             std.debug.assert(n > 0);
             if (n == self.buf.len) {
                 logger.err("out of memory reading at least {any} bytes from tty!", .{n});
@@ -77,14 +79,13 @@ pub const BufferedCmdIterator = struct {
             self.cmd_it.bytes = self.buf[0..n];
         }
 
-        var parse_fbs = std.io.fixedBufferStream(&self.parse_buf);
-        const parse_writer = parse_fbs.writer();
+        var parse_writer: std.Io.Writer = .fixed(&self.parse_buf);
 
         const raw_cmd: []const u8 = (try self.cmd_it.next()).?;
 
-        parse_fbs.reset();
-        try parseWrite(raw_cmd, parse_writer);
-        const parsed_cmd: []const u8 = parse_fbs.getWritten();
+        parse_writer.end = 0;
+        try parseWrite(raw_cmd, &parse_writer);
+        const parsed_cmd: []const u8 = parse_writer.buffered();
         std.debug.print("parsed cmd is: {s}\n", .{parsed_cmd});
         std.debug.print("raw cmd is: {s}\n", .{raw_cmd});
         return .{.raw_cmd = raw_cmd, .parsed_cmd = parsed_cmd};
@@ -252,7 +253,7 @@ fn parseInputBytes(bytes: []const u8, writer: anytype) !void {
                 0...31, 127 => |byte| {
                     match_keycodes.match_ascii(byte, writer) catch |err| {
                         switch (@TypeOf(err)) {
-                            MatchError => try writer.print("{s}", .{myFmtBytes(&[1]u8{byte})}),
+                            MatchError => try writer.print("{}", .{myFmtBytes(&[1]u8{byte})}),
                             else => unreachable,
                         }
                     };
@@ -310,10 +311,10 @@ pub fn parseWrite(raw: []const u8, writer: anytype) !void {
     // std.debug.print("Input sequence parse attempt: ", .{});
     if (raw.len > 0) {
         parseInputBytes(raw, writer) catch {
-            try writer.print("Readable bytes: {s}", .{myFmtBytes(raw)});
+            try writer.print("Readable bytes: {}", .{myFmtBytes(raw)});
         };
     } else {
-        try writer.print("Readable bytes: {s}", .{myFmtBytes(raw)});
+        try writer.print("Readable bytes: {}", .{myFmtBytes(raw)});
     }
     // std.debug.print("\n", .{});
 }
@@ -329,20 +330,22 @@ pub fn rawWrite(bytes: []const u8, writer: anytype) !void {
 
 test "test parse bytes 0..128" {
     // zig test src/parse_utils.zig
-    const write_utils = @import("write_utils.zig");
-    const stderr_writer = write_utils.stderr_writer;
+    var buf: [4096]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
 
     for (0..128) |i| {
-        try parseWrite(&[1]u8{@as(u8, @truncate(i))}, stderr_writer);
+        writer.end = 0;
+        try parseWrite(&[1]u8{@as(u8, @truncate(i))}, &writer);
     }
 }
 
 test "test parse bytes 27(ALT/ESC/...) + 0..128" {
     // zig test src/parse_utils.zig
-    const write_utils = @import("write_utils.zig");
-    const stderr_writer = write_utils.stderr_writer;
+    var buf: [4096]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
 
     for (0..128) |i| {
-        try parseWrite(&[2]u8{ 27, @as(u8, @truncate(i)) }, stderr_writer);
+        writer.end = 0;
+        try parseWrite(&[2]u8{ 27, @as(u8, @truncate(i)) }, &writer);
     }
 }
