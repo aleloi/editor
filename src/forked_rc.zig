@@ -2,7 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 // I think this works as long as gpa has static lifetime.
-var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+var gpa = std.heap.DebugAllocator(.{}){};
 const gpa_alloc = gpa.allocator();
 
 /// LEAKS memory, user of this  module must deinit.
@@ -14,7 +14,7 @@ const arena_alloc = arena.allocator();
 // which doesn't have static lifetime.
 
 // fn comptime_gpa() std.mem.Allocator {
-//     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+//     var gpa = std.heap.DebugAllocator(.{}){};
 //     return gpa.allocator();
 // }
 

@@ -8,10 +8,9 @@ const time_utils = @import("time_utils.zig");
 const mu = @import("misc_utils.zig");
 
 var log_buf: [5000]u8 = undefined;
-var log_fbs = std.io.fixedBufferStream(&log_buf);
-const log_fbw = log_fbs.writer();
+var log_writer: std.Io.Writer = .fixed(&log_buf);
 
-pub const std_options = .{
+pub const std_options: std.Options = .{
     // Set the log level to info
     .log_level = .debug,
     // Define logFn to override the std implementation
@@ -51,17 +50,24 @@ fn levelAsText(comptime level: std.log.Level) []const u8 {
     };
 }
 
-fn getFileHandle(name: []const u8) !std.fs.File {
-    const dir: std.fs.Dir = std.fs.cwd();
+var log_fd: std.posix.fd_t = -1;
 
-    return try dir.createFile(name, .{ .truncate = false });
+fn getFileHandle(name: []const u8) !std.posix.fd_t {
+    return try std.posix.openat(std.posix.AT.FDCWD, name, .{
+        .ACCMODE = .WRONLY,
+        .CREAT = true,
+        .APPEND = true,
+    }, 0o664);
 }
-var handle: std.fs.File = undefined;
-var file_writer: ?@TypeOf(handle.writer()) = null;
+
+fn writeToFile(data: []const u8) void {
+    if (log_fd < 0) return;
+    _ = std.os.linux.write(log_fd, data.ptr, data.len);
+}
 
 pub fn myLogFn(
     comptime level: std.log.Level,
-    comptime scope: @TypeOf(.EnumLiteral),
+    comptime scope: @EnumLiteral(),
     comptime format: []const u8,
     args: anytype,
 ) void {
@@ -79,23 +85,21 @@ pub fn myLogFn(
     const prefix = " [" ++ comptime levelAsText(level) ++ "] " ++ scope_prefix;
     const new_format = prefix ++ format ++ "\n";
     // write to fbs
-    log_fbs.reset();
-    time_utils.writeTimestamp(time_utils.now(), log_fbw) catch return;
-    log_fbw.print(new_format, args) catch return;
+    log_writer.end = 0;
+    time_utils.writeTimestamp(time_utils.now(), &log_writer) catch return;
+    log_writer.print(new_format, args) catch return;
     // first print to file
-    if (file_writer) |writer| writer.writeAll(log_fbs.getWritten()) catch {};
+    writeToFile(log_writer.buffered());
 
     // blk: {
     //     time_utils.writeTimestampNewline(time_utils.now(), file_writer orelse break :blk) catch break :blk;
     //     (file_writer orelse break :blk).print(new_format, args) catch break :blk;
     // }
     // Print the message to stderr, silently ignoring any errors
-    std.debug.lockStdErr();
-    defer std.debug.unlockStdErr();
-    const stderr = std.io.getStdErr().writer();
-    // time_utils.writeTimestampNewline(time_utils.now(), stderr) catch return;
-    // stderr.print(new_format, args) catch return;
-    stderr.writeAll(log_fbs.getWritten()) catch {};
+    var stderr_buf: [64]u8 = undefined;
+    const stderr = std.debug.lockStderr(&stderr_buf);
+    defer std.debug.unlockStderr();
+    stderr.file_writer.interface.writeAll(log_writer.buffered()) catch {};
 }
 
 pub fn main() void {
@@ -113,11 +117,9 @@ pub fn main() void {
 
 /// init and return default_logger
 pub fn getLogger(file: ?[]const u8) !@TypeOf(std.log) {
-    // pub fn get_logger(comptime scope: ?@TypeOf(.EnumLiteral), file: ?[]const u8) !@TypeOf(std.log.scoped(scope orelse std.log.default_log_scope)) {
-    handle = getFileHandle(file orelse "app.log") catch unreachable;
-    defer handle.close();
-    try handle.seekFromEnd(0);
-    file_writer = handle.writer();
+    // pub fn get_logger(comptime scope: ?@EnumLiteral(), file: ?[]const u8) !@TypeOf(std.log.scoped(scope orelse std.log.default_log_scope)) {
+    log_fd = getFileHandle(file orelse "app.log") catch unreachable;
+    defer std.os.linux.close(log_fd);
     default_logger.debug("logger initialized!", .{});
     return default_logger;
     // return std.log.scoped(scope orelse std.log.default_log_scope);
@@ -125,18 +127,14 @@ pub fn getLogger(file: ?[]const u8) !@TypeOf(std.log) {
 
 /// open file handle
 pub fn loggerInit(file: ?[]const u8) !void {
-    handle = getFileHandle(file orelse "app.log") catch unreachable;
-    // defer handle.close();
-    try handle.seekFromEnd(0);
-    file_writer = handle.writer();
-
+    log_fd = getFileHandle(file orelse "app.log") catch unreachable;
     default_logger.debug("logger initialized!", .{});
     // return std.log.scoped(scope orelse std.log.default_log_scope);
 }
 
 /// close file handle
 pub fn loggerDeinit() void {
-    defer handle.close();
+    _ = std.os.linux.close(log_fd);
 }
 
 pub fn logErrorFmt(
@@ -162,32 +160,24 @@ pub fn logErrorFmt(
 pub fn logError(er: anyerror, msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_addr: ?usize) @TypeOf(er) {
     _ = error_return_trace;
     var buf: [5000]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    const writer = fbs.writer();
+    var writer: std.Io.Writer = .fixed(&buf);
 
     blk: {
         writer.print("error: {s} {s}\n", .{ @errorName(er), msg }) catch break :blk;
-        const config: std.io.tty.Config = .escape_codes;
+        const terminal: std.Io.Terminal = .{ .writer = &writer, .mode = .escape_codes };
         if (builtin.strip_debug_info) {
             writer.print("Unable to dump stack trace: debug info stripped\n", .{}) catch break :blk;
             break :blk;
         }
-        const debug_info = std.debug.getSelfDebugInfo() catch |err| {
-            writer.print("Unable to dump stack trace: Unable to open debug info: {s}\n", .{@errorName(err)}) catch break :blk;
-            break :blk;
-        };
-        std.debug.writeCurrentStackTrace(
-            writer,
-            debug_info,
-            config,
-            ret_addr orelse @returnAddress(),
-        ) catch |err| {
+        std.debug.writeCurrentStackTrace(.{
+            .first_address = ret_addr orelse @returnAddress(),
+        }, terminal) catch |err| {
             writer.print("Unable to dump stack trace: {s}\n", .{@errorName(err)}) catch break :blk;
             break :blk;
         };
     }
 
-    default_logger.err("{s}", .{fbs.getWritten()});
+    default_logger.err("{s}", .{writer.buffered()});
 
     return er;
 }
@@ -208,38 +198,30 @@ pub fn panicFmt(
             break :blk &buf;
         },
     };
-    panic(msg, @errorReturnTrace(), @returnAddress());
+    panic(msg, @returnAddress());
 }
 
-pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_addr: ?usize) noreturn {
+pub fn panic(msg: []const u8, first_trace_addr: ?usize) noreturn {
     var buf: [5000]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    const writer = fbs.writer();
+    var writer: std.Io.Writer = .fixed(&buf);
 
     blk: {
         writer.print("panic: {s}\n", .{msg}) catch break :blk;
-        const config: std.io.tty.Config = .escape_codes;
+        const terminal: std.Io.Terminal = .{ .writer = &writer, .mode = .escape_codes };
         if (builtin.strip_debug_info) {
             writer.print("Unable to dump stack trace: debug info stripped\n", .{}) catch break :blk;
             break :blk;
         }
-        const debug_info = std.debug.getSelfDebugInfo() catch |err| {
-            writer.print("Unable to dump stack trace: Unable to open debug info: {s}\n", .{@errorName(err)}) catch break :blk;
-            break :blk;
-        };
-        std.debug.writeCurrentStackTrace(
-            writer,
-            debug_info,
-            config,
-            ret_addr orelse @returnAddress(),
-        ) catch |err| {
+        std.debug.writeCurrentStackTrace(.{
+            .first_address = first_trace_addr orelse @returnAddress(),
+        }, terminal) catch |err| {
             writer.print("Unable to dump stack trace: {s}\n", .{@errorName(err)}) catch break :blk;
             break :blk;
         };
     }
 
-    default_logger.err("{s}", .{fbs.getWritten()});
+    default_logger.err("{s}", .{writer.buffered()});
     // _ = error_return_trace;
     // std.posix.exit(1);
-    std.builtin.default_panic(msg, error_return_trace, ret_addr);
+    std.debug.defaultPanic(msg, first_trace_addr);
 }

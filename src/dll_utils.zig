@@ -173,8 +173,8 @@ fn insert(allocator: Allocator, root: *Node, at: Point, with: []const u8) !void 
 
     if (col >= node_len) return DllError.InvalidIndex;
 
-    var list = std.ArrayList(u8).init(allocator);
-    defer list.deinit();
+    var list: std.ArrayList(u8) = .empty;
+    defer list.deinit(allocator);
 
     // while (col >= node_len) {
     //     row += 1;
@@ -185,11 +185,11 @@ fn insert(allocator: Allocator, root: *Node, at: Point, with: []const u8) !void 
     // }
 
     // row before cursor
-    try list.appendSlice(orig_row[0..col]);
+    try list.appendSlice(allocator, orig_row[0..col]);
     // inserted text
-    try list.appendSlice(with);
+    try list.appendSlice(allocator, with);
     // row from cursor
-    try list.appendSlice(orig_row[col..node_len]);
+    try list.appendSlice(allocator, orig_row[col..node_len]);
     const new_fst, const new_lst = try fromStr(allocator, list.items);
     // try link(node.prev, new_fst.next);
     // try link(new_lst.prev, node.next);
@@ -203,8 +203,8 @@ fn delete(allocator: Allocator, root: *Node, from: Point, to: Point) !void {
     const fr_row, const fr_col = from;
     const to_row, const to_col = to;
 
-    var list = std.ArrayList(u8).init(allocator);
-    defer list.deinit();
+    var list: std.ArrayList(u8) = .empty;
+    defer list.deinit(allocator);
 
     // for debug, to compare old elem[to] and new elem[from]
     var compare_buf = [2]u8{ 0, 0 };
@@ -223,8 +223,8 @@ fn delete(allocator: Allocator, root: *Node, from: Point, to: Point) !void {
 
     try to_node.getPart(compare_buf[0..], to_col, to_col + 1);
 
-    try list.appendSlice(orig_fr_row[0..fr_col]);
-    try list.appendSlice(orig_to_row[to_col..to_node_len]);
+    try list.appendSlice(allocator, orig_fr_row[0..fr_col]);
+    try list.appendSlice(allocator, orig_to_row[to_col..to_node_len]);
 
     const new_fst, const new_lst = try fromStr(allocator, list.items);
     try replaceSegment(.{ fr_node, to_node }, .{ new_fst.next, new_lst.prev });

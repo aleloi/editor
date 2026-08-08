@@ -22,7 +22,7 @@ pub const PosIterator = struct {
 
     fn next(self: *@This()) ?Pos {
         if (self.idx >= self.slice.len) return null;
-        const res = .{ .row = self.row, .col = self.col };
+        const res = Pos{ .row = self.row, .col = self.col };
         if (self.slice[self.idx] == '\n') {
             self.row += 1;
             self.col = 0;
@@ -69,14 +69,14 @@ pub const RenderBuffer = struct {
         var res: @This() = .{.alloc=alloc, .lines = undefined, .slices = undefined, .viewport = viewport };
         res.lines = try @TypeOf(res.lines).initCapacity(alloc, viewport.height);
         errdefer {
-            for (res.lines.items) |line| {
-                line.deinit();
+            for (res.lines.items) |*line| {
+                line.deinit(alloc);
             }
-            res.lines.deinit();
+            res.lines.deinit(alloc);
         }
 
         res.slices = try @TypeOf(res.slices).initCapacity(alloc, viewport.height);
-        errdefer res.slices.deinit();
+        errdefer res.slices.deinit(alloc);
 
         for (0..viewport.height) |_| {
             res.lines.appendAssumeCapacity(try Line.initCapacity(alloc, viewport.width));
@@ -89,27 +89,27 @@ pub const RenderBuffer = struct {
         defer self.viewport = viewport;
 
         while (self.lines.items.len > viewport.height) {
-            const l = self.lines.pop();
-            l.deinit();
+            var l = self.lines.pop().?;
+            l.deinit(self.alloc);
         }
 
-        try self.lines.ensureTotalCapacity(viewport.height);
+        try self.lines.ensureTotalCapacity(self.alloc, viewport.height);
         for (self.lines.items) |*itm| {
-            try itm.*.ensureTotalCapacity(viewport.width);
+            try itm.*.ensureTotalCapacity(self.alloc, viewport.width);
         }
         while (self.lines.items.len < viewport.height) {
             self.lines.appendAssumeCapacity(try Line.initCapacity(self.alloc, viewport.width));
         }
 
-        try self.slices.ensureTotalCapacity(viewport.height);
+        try self.slices.ensureTotalCapacity(self.alloc, viewport.height);
     }
 
     pub fn deinit(self: *@This()) void {
-        self.slices.deinit();
-        for (self.lines.items) |line| {
-            line.deinit();
+        self.slices.deinit(self.alloc);
+        for (self.lines.items) |*line| {
+            line.deinit(self.alloc);
         }
-        self.lines.deinit();
+        self.lines.deinit(self.alloc);
     }
 
     /// Test impl, not thinking about efficiency. Assumes the text is

@@ -4,33 +4,26 @@ var target: std.Build.ResolvedTarget = undefined;
 var optimize: std.builtin.OptimizeMode = undefined;
 
 fn addDeps(exe: *std.Build.Step.Compile, b: *std.Build) void {
-    // const target = b.standardTargetOptions(.{});
-    // const optimize = b.standardOptimizeOption(.{});
-
-    const treez = b.dependency("treez", .{
+    const tree_sitter_dep = b.dependency("tree_sitter", .{
         .target = target,
         .optimize = optimize,
     });
 
-    exe.root_module.addImport("treez", treez.module("treez"));
+    exe.root_module.addImport("treez", tree_sitter_dep.module("treez"));
 
-    exe.linkLibC();
+    exe.root_module.link_libc = true;
+}
 
-    exe.linkLibrary(b.dependency("tree-sitter", .{
-        .target = target,
-        .optimize = optimize,
-    }).artifact("tree-sitter"));
-
-    exe.linkLibrary(b.dependency("tree-sitter-zig", .{
-        .target = target,
-        .optimize = optimize,
-    }).artifact("tree-sitter-zig"));
+fn addTracy(artifact: *std.Build.Step.Compile, tracy: *std.Build.Dependency) void {
+    artifact.root_module.addImport("tracy", tracy.module("tracy"));
+    artifact.root_module.linkLibrary(tracy.artifact("tracy"));
+    artifact.root_module.link_libcpp = true;
 }
 
 // Although this function looks imperative, note that its job is to
 // declaratively construct a build graph that will be executed by an external
 // runner.
-pub fn build(b: *std.Build) void {
+pub fn build(b: *std.Build) !void {
     // Standard target options allows the person running `zig build` to choose
     // what target to build for. Here we do not override the defaults, which
     // means any target is allowed, and the default is native. Other options
@@ -53,48 +46,19 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/rope.zig"),
     });
 
-    // const lib = b.addStaticLibrary(.{
-    //     .name = "editor",
-    //     // In this case the main source file is merely a path, however, in more
-    //     // complicated build scripts, this could be a generated file.
-    //     .root_source_file = b.path("src/mini.zig"),
-    //     .target = target,
-    //     .optimize = optimize,
-    // });
-
-    // // This declares intent for the library to be installed into the standard
-    // // location when the user invokes the "install" step (the default step when
-    // // running `zig build`).
-    // b.installArtifact(lib);
-
     const exe = b.addExecutable(.{
         .name = "editor",
-        .root_source_file = b.path("src/mini.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/mini.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
 
     addDeps(exe, b);
 
     exe.root_module.addImport("rope", rope_mod);
-    exe.root_module.addImport("tracy", tracy.module("tracy"));
-    exe.linkLibrary(tracy.artifact("tracy"));
-    exe.linkLibCpp();
-
-    // // exe.root_module.addImport("treez", treez);
-    // exe.root_module.addImport("treez", treez.module("treez"));
-
-    // exe.linkLibC();
-
-    // exe.linkLibrary(b.dependency("tree-sitter", .{
-    //     .target = target,
-    //     .optimize = optimize,
-    // }).artifact("tree-sitter"));
-
-    // exe.linkLibrary(b.dependency("tree-sitter-zig", .{
-    //     .target = target,
-    //     .optimize = optimize,
-    // }).artifact("tree-sitter-zig"));
+    addTracy(exe, tracy);
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
@@ -106,8 +70,8 @@ pub fn build(b: *std.Build) void {
     // such a dependency.
     const run_cmd = b.addRunArtifact(exe);
 
-    // By making the run step depend on the install step, it will be run from the
-    // installation directory rather than directly from within the cache directory.
+    // By making the run step depend on the install step, it will be run from
+    // the installation directory rather than directly from within the cache directory.
     // This is not necessary, however, if the application depends on other installed
     // files, this ensures they will be present and in the expected location.
     run_cmd.step.dependOn(b.getInstallStep());
@@ -127,9 +91,11 @@ pub fn build(b: *std.Build) void {
     // Creates a step for unit testing. This only builds the test executable
     // but does not run it.
     const lib_unit_tests = b.addTest(.{
-        .root_source_file = b.path("src/mini.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/mini.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
 
     const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
@@ -138,23 +104,21 @@ pub fn build(b: *std.Build) void {
     run_lib_unit_tests.has_side_effects = true;
 
     const exe_unit_tests = b.addTest(.{
-        .root_source_file = b.path("src/mini.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/mini.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     addDeps(exe_unit_tests, b);
     addDeps(lib_unit_tests, b);
 
     // mini.zig imports document.zig (which imports rope) and tracy
+    addTracy(lib_unit_tests, tracy);
     lib_unit_tests.root_module.addImport("rope", rope_mod);
-    lib_unit_tests.root_module.addImport("tracy", tracy.module("tracy"));
-    lib_unit_tests.linkLibrary(tracy.artifact("tracy"));
-    lib_unit_tests.linkLibCpp();
 
+    addTracy(exe_unit_tests, tracy);
     exe_unit_tests.root_module.addImport("rope", rope_mod);
-    exe_unit_tests.root_module.addImport("tracy", tracy.module("tracy"));
-    exe_unit_tests.linkLibrary(tracy.artifact("tracy"));
-    exe_unit_tests.linkLibCpp();
 
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
 
@@ -176,15 +140,15 @@ pub fn build(b: *std.Build) void {
     };
     for (rope_test_files) |test_file| {
         const rope_test = b.addTest(.{
-            .root_source_file = b.path(test_file),
-            .target = target,
-            .optimize = optimize,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(test_file),
+                .target = target,
+                .optimize = optimize,
+            }),
         });
         rope_test.root_module.addImport("rope", rope_mod);
         // document.zig imports tracy
-        rope_test.root_module.addImport("tracy", tracy.module("tracy"));
-        rope_test.linkLibrary(tracy.artifact("tracy"));
-        rope_test.linkLibCpp();
+        addTracy(rope_test, tracy);
         const run_rope_test = b.addRunArtifact(rope_test);
         run_rope_test.has_side_effects = true;
         test_step.dependOn(&run_rope_test.step);
@@ -194,22 +158,17 @@ pub fn build(b: *std.Build) void {
 
     const exe_check = b.addExecutable(.{
         .name = "foo",
-        .root_source_file = b.path("src/mini.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/mini.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     addDeps(exe_check, b);
 
+    addTracy(exe_check, tracy);
     exe_check.root_module.addImport("rope", rope_mod);
-    exe_check.root_module.addImport("tracy", tracy.module("tracy"));
-    exe_check.linkLibrary(tracy.artifact("tracy"));
-    exe_check.linkLibCpp();
 
-    // Any other code to define dependencies would
-    // probably be here.
-
-    // These two lines you might want to copy
-    // (make sure to rename 'exe_check')
     const check = b.step("check", "Check if foo compiles");
     check.dependOn(&exe_check.step);
 }

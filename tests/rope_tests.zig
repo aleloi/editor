@@ -89,7 +89,7 @@ const PosIterator = struct {
 
     fn next(self: *@This()) ?Pos {
         if (self.idx >= self.slice.len) return null;
-        const res = .{ .row = self.row, .col = self.col };
+        const res = Pos{ .row = self.row, .col = self.col };
         if (self.slice[self.idx] == '\n') {
             self.row += 1;
             self.col = 0;

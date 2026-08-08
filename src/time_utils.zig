@@ -40,23 +40,23 @@ pub fn writeTimestamp(secs: u64, writer: anytype) !void {
 
 /// write timestamp to buf
 pub fn bufPrintTimestamp(secs: u64, buf: []u8) !void {
-    var fbs = std.io.fixedBufferStream(buf);
-    const writer = fbs.writer();
-    try writeTimestamp(secs, writer);
+    var writer: std.Io.Writer = .fixed(buf);
+    try writeTimestamp(secs, &writer);
 }
 
 /// write timestamp to stderr
 pub fn printTimestamp(secs: u64) !void {
-    std.debug.lockStdErr();
-    defer std.debug.unlockStdErr();
-    const stderr = std.io.getStdErr().writer();
-    try writeTimestamp(secs, stderr);
-    try stderr.print("\n", .{});
+    var stderr_buf: [128]u8 = undefined;
+    const stderr = std.debug.lockStderr(&stderr_buf);
+    defer std.debug.unlockStderr();
+    try writeTimestamp(secs, &stderr.file_writer.interface);
+    try stderr.file_writer.interface.print("\n", .{});
 }
 
 /// get current epoch time in seconds. wrapper around @abs(std.time.timestamp())
 pub fn now() u64 {
-    return @abs(std.time.timestamp());
+    const ts = std.Io.Timestamp.now(std.Options.debug_io, .real);
+    return @abs(ts.toSeconds());
 }
 
 // pub fn main() !void {
