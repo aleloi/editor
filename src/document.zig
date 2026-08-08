@@ -305,7 +305,7 @@ pub const Document = struct {
             };
         };
 
-        std.debug.print("PASTE SELECTION; Begin: {}, end: {}\n", .{begin, end});
+        std.debug.print("PASTE SELECTION; Begin: {d}, end: {d}\n", .{begin, end});
 
         const begin_onwards: RopeRc = b: {
             const splt = try Rope.splitAt(last, begin);

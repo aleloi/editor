@@ -229,7 +229,7 @@ pub fn main(init: std.process.Init) !void {
             const zone_print = tracy.initZone(@src(), .{ .name = "print" });
             defer zone_print.deinit();
             print("\nAfter handling commands: dc.vp: {}\n", .{ dc.render_buffer.viewport});
-            print("Cursor: {}\n\n", .{dc.cursor});
+            print("Cursor: {any}\n\n", .{dc.cursor});
         }
         //try dc.render_buffer.resize(vp);
         const txt = b: {
@@ -318,10 +318,10 @@ fn render_bottom_ui(maybe_bytes: ?[]const u8, writer: anytype, cursor: Cursor, v
     try writer.print("\x1B[45m", .{});
     try writer.print("MODE: {s:>6}", .{@tagName(mode)});
     try writer.print("\x1B[47m", .{});
-    try writer.print(" selection anchor {any: >3}   head {any: >3}", .{
+    try writer.print(" selection anchor {any}   head {any}", .{
         cursor.selection.anchor, cursor.selection.head });
     try moveCursor(writer, size.height - 4, 0);
-    try writer.print("view {any: >3}   cursor {any: >3} (move using CTRL+<arrow>)", .{ view, cursor.pos });
+    try writer.print("view {any}   cursor {f} (move using CTRL+<arrow>)", .{ view, cursor.pos });
     try writer.print("\x1B[49m", .{});
 }
 
@@ -385,7 +385,7 @@ fn render_cursor(writer: anytype, cursor: Cursor, view: doc.ViewPort, lns: []con
 /// write <txt> to the buffer at row y col 0, applying format.myFmtLine
 fn writeLine(writer: anytype, txt: []const u8, y: usize) !void {
     try moveCursor(writer, y, non_content_cols);
-    try writer.print("{}", .{format.myFmtLine(txt)});
+    try writer.print("{f}", .{format.myFmtLine(txt)});
 }
 
 /// move the cursor to row, col, using 0-indexing

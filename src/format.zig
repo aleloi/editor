@@ -74,9 +74,9 @@ test "test format" {
     var my_buf: [256]u8 = .{0} ** 256;
     for (0..256) |i| my_buf[i] = @as(u8, @truncate(i));
     for (0..16) |i| {
-        std.debug.print("{}\n", .{myFmtLine(my_buf[(i * 16)..][0..16])});
+        std.debug.print("{f}\n", .{myFmtLine(my_buf[(i * 16)..][0..16])});
     }
-    std.debug.print("{}\n", .{myFmtLine(&my_buf)});
+    std.debug.print("{f}\n", .{myFmtLine(&my_buf)});
 }
 
 // test "test panic" {

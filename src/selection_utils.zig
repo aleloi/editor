@@ -89,7 +89,7 @@ pub const Cursor = struct {
         self: @This(),
         writer: *std.Io.Writer,
     ) std.Io.Writer.Error!void {
-        try writer.print("cur ({any}, t_col {d}, {any})", .{ self.pos, self.t_col, self.sel });
+        try writer.print("cur ({f}, t_col {d}, {f})", .{ self.pos, self.t_col, self.sel });
     }
 };
 pub const def_pos = point(0, 0);
@@ -278,7 +278,7 @@ pub const Selection = struct {
         self: @This(),
         writer: *std.Io.Writer,
     ) std.Io.Writer.Error!void {
-        try writer.print("sel (an {any}, he {any})", .{ self.anchor, self.head });
+        try writer.print("sel (an {f}, he {f})", .{ self.anchor, self.head });
     }
     /// is the current selection empty? that is, is `head == anchor`?
     pub fn isEmpty(self: *const @This()) bool {

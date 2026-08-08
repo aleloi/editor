@@ -253,7 +253,7 @@ fn parseInputBytes(bytes: []const u8, writer: anytype) !void {
                 0...31, 127 => |byte| {
                     match_keycodes.match_ascii(byte, writer) catch |err| {
                         switch (@TypeOf(err)) {
-                            MatchError => try writer.print("{}", .{myFmtBytes(&[1]u8{byte})}),
+                            MatchError => try writer.print("{f}", .{myFmtBytes(&[1]u8{byte})}),
                             else => unreachable,
                         }
                     };
@@ -311,10 +311,10 @@ pub fn parseWrite(raw: []const u8, writer: anytype) !void {
     // std.debug.print("Input sequence parse attempt: ", .{});
     if (raw.len > 0) {
         parseInputBytes(raw, writer) catch {
-            try writer.print("Readable bytes: {}", .{myFmtBytes(raw)});
+            try writer.print("Readable bytes: {f}", .{myFmtBytes(raw)});
         };
     } else {
-        try writer.print("Readable bytes: {}", .{myFmtBytes(raw)});
+        try writer.print("Readable bytes: {f}", .{myFmtBytes(raw)});
     }
     // std.debug.print("\n", .{});
 }
