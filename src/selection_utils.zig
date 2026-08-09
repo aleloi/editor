@@ -60,26 +60,6 @@ pub fn isBetween(A: Point, B: Point, C: Point) bool {
 pub const logger = main.logger;
 pub const std_options = main.std_options;
 
-/// quit commands
-pub const q_eq: [3][]const u8 = .{ "ESC", "Q", "q" };
-/// down commands
-pub const j_eq: [3][]const u8 = .{ "DOWN", "J", "j" };
-/// up commands
-pub const k_eq: [3][]const u8 = .{ "UP", "K", "k" };
-
-/// move view
-pub const arrows: [4][]const u8 = .{ "UP", "DOWN", "LEFT", "RIGHT" };
-/// move cursor
-pub const c_arrows: [4][]const u8 = .{ "CTRL+UP", "CTRL+DOWN", "CTRL+LEFT", "CTRL+RIGHT" };
-/// change selection
-pub const sc_arrows: [4][]const u8 = .{ "SHIFT+CTRL+UP", "SHIFT+CTRL+DOWN", "SHIFT+CTRL+LEFT", "SHIFT+CTRL+RIGHT" };
-/// move view fn+arrow
-pub const fn_arrows: [4][]const u8 = .{ "PGUP", "PGDN", "HOME", "END" };
-/// move cursor fn+arrow
-pub const c_fn_arrows: [4][]const u8 = .{ "CTRL+PGUP", "CTRL+PGDN", "CTRL+HOME", "CTRL+END" };
-/// change selection fn+arrow
-pub const sc_fn_arrows: [4][]const u8 = .{ "SHIFT+CTRL+PGUP", "SHIFT+CTRL+PGDN", "SHIFT+CTRL+HOME", "SHIFT+CTRL+END" };
-
 /// a point, and a selection
 pub const Cursor = struct {
     pos: Point,
@@ -94,29 +74,6 @@ pub const Cursor = struct {
 };
 pub const def_pos = point(0, 0);
 pub var cursor: Cursor = .{ .pos = def_pos, .sel = emptySel(def_pos) };
-
-/// tries to match a direction to the end of slice str
-pub fn matchDirSuffix(str: []const u8) !Direction {
-    logger.debug("matchDirSuffix {s}", .{str});
-    for (arrows, dirs) |arrow, dir| {
-        // print("'{s}' '{s}'\n", .{ str[(str.len - arrow.len)..], arrow });
-        if (std.mem.eql(u8, str[(str.len - arrow.len)..], arrow)) {
-            logger.debug("match {any}", .{dir});
-            return dir;
-        }
-    }
-    for (fn_arrows, dirs) |arrow, dir| {
-        // print("'{s}' '{s}'\n", .{ str[(str.len - arrow.len)..], arrow });
-        if (std.mem.eql(u8, str[(str.len - arrow.len)..], arrow)) {
-            logger.debug("match {any}", .{dir});
-            return dir;
-        }
-    }
-    logger.warn("no match!", .{});
-    return error.Error;
-}
-
-const dirs: [4]Direction = .{ Direction.up, Direction.down, Direction.left, Direction.right };
 
 pub const Direction = enum {
     up,

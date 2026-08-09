@@ -13,6 +13,10 @@
             .url = "https://github.com/neurocyte/zig-tracy/archive/33baab18edde33cf132b778301634c87ada2aeef.tar.gz",
             .hash = "zig_tracy-0.0.3-5-cp3Lx3AAD5wyipG-N0smFX-YdExc4efrN4KsFQFpG5",
         },
+        .vaxis = .{
+            .url = "git+https://github.com/rockorager/libvaxis.git#82cec0db8fc57c32f2ce4c1c3fc377052f4c86ba",
+            .hash = "vaxis-0.6.0-BWNV_KwYCgB-L5MNRY8I8HGbKDE6KOxDPAVSaZ8-3lJ8",
+        },
     },
     .paths = .{
         "build.zig",

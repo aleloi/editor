@@ -1,7 +1,4 @@
 const std = @import("std");
-const mem = std.mem;
-const linux = std.os.linux;
-const print = std.debug.print;
 
 const doc = @import("document.zig");
 const Cursor = doc.Cursor;
@@ -11,10 +8,9 @@ const Direction = doc.Direction;
 
 const tracy = @import("tracy");
 const treez = @import("treez");
+const vaxis = @import("vaxis");
 
 const format = @import("format.zig");
-const term_utils = @import("term_utils.zig");
-const parse_utils = @import("parse_utils.zig");
 const write_utils = @import("write_utils.zig");
 const misc_utils = @import("misc_utils.zig");
 const selection_utils = @import("selection_utils.zig");
@@ -35,25 +31,18 @@ const non_content_cols: usize = 5;  // TODO!
 
 /// window dimensions
 var size: Size = undefined;
-var tty: std.Io.File = undefined;
+var tty: vaxis.Tty = undefined;
+var vx: vaxis.Vaxis = undefined;
 
-// åäö
-// zig run src/mini.zig < src/parse_utils.zig &> mini.log
-// zig run src/mini.zig -O ReleaseFast < src/parse_utils.zig &> mini.log
-// https://ziglang.org/documentation/master/std/#std.posix.poll
-// https://chatgpt.com/share/43543411-1296-4086-990d-0df98b621321
-
-/// tries to match the slice needle to a slice in haystack.
-fn genericMatch(needle: []const u8, haystack: []const []const u8) bool {
-    const zone = tracy.initZone(@src(), .{ .name = "generic match" });
-    defer zone.deinit();
-    for (haystack) |straw| {
-        if (std.mem.eql(u8, needle, straw)) {
-            return true;
-        }
-    }
-    return false;
-}
+/// vaxis event union. vaxis uses @hasField to only deliver declared fields.
+const Event = union(enum) {
+    key_press: vaxis.Key,
+    key_release: vaxis.Key,
+    winsize: vaxis.Winsize,
+    focus_in,
+    focus_out,
+    paste: []const u8,
+};
 
 /// return return the pair sorted by row, col
 fn getSortedPoints(A: Point, B: Point) struct { Point, Point } {
@@ -75,31 +64,6 @@ fn isBetween(A: Point, B: Point, C: Point) bool {
     return ((!cmpPoints(B, A)) and cmpPoints(B, C));
 }
 
-/// quit commands
-const q_eq: [3][]const u8 = .{ "ESC", "Q", "q" };
-/// down commands
-const j_eq: [3][]const u8 = .{ "DOWN", "J", "j" };
-/// up commands
-const k_eq: [3][]const u8 = .{ "UP", "K", "k" };
-
-pub const arrows: [4][]const u8 = .{ "UP", "DOWN", "LEFT", "RIGHT" };
-/// move cursor
-const c_arrows: [4][]const u8 = .{ "CTRL+UP", "CTRL+DOWN", "CTRL+LEFT", "CTRL+RIGHT" };
-/// change selection
-const sc_arrows: [4][]const u8 = .{ "SHIFT+CTRL+UP", "SHIFT+CTRL+DOWN", "SHIFT+CTRL+LEFT", "SHIFT+CTRL+RIGHT" };
-/// move cursor fn+arrow
-const c_fn_arrows: [4][]const u8 = .{ "CTRL+PGUP", "CTRL+PGDN", "CTRL+HOME", "CTRL+END" };
-/// change selection fn+arrow
-const sc_fn_arrows: [4][]const u8 = .{ "SHIFT+CTRL+PGUP", "SHIFT+CTRL+PGDN", "SHIFT+CTRL+HOME", "SHIFT+CTRL+END" };
-
-const paste_sel: [1][]const u8 = .{ "CTRL+y" };
-
-const insert_mode: [1][]const u8 = .{"i"};
-
-const normal_mode: [1][]const u8 = .{"ASCII-ESC / ESC / CTRL+8"};
-const undo: [1][]const u8 = .{"CTRL+u"};
-
-
 const Mode = enum {
     insert,
     normal
@@ -108,8 +72,6 @@ const Mode = enum {
 var mode: Mode = .normal;
 
 pub fn main(init: std.process.Init) !void {
-    term_utils.app_io = init.io;
-
     // tree-sitter init (parses this file, does not integrate with Document yet)
     const ziglang = try treez.Language.get("zig");
     var parser = try treez.Parser.create();
@@ -119,19 +81,24 @@ pub fn main(init: std.process.Init) !void {
     const tree = try parser.parseString(null, inp);
     defer tree.destroy();
 
-    try term_utils.uncook();
-    defer term_utils.cook() catch {};
+    var tty_buf: [1024]u8 = undefined;
+    tty = try vaxis.Tty.init(init.io, &tty_buf);
+    defer tty.deinit();
 
-    // Still needed for rendering
-    tty = term_utils.tty;
+    var gpa = std.heap.DebugAllocator(.{}){};
+    const alloc = gpa.allocator();
+
+    vx = try vaxis.init(init.io, alloc, init.environ_map, .{
+        .system_clipboard_allocator = alloc,
+    });
+    defer vx.deinit(alloc, tty.writer());
+
+    try vx.enterAltScreen(tty.writer());
 
     try logging.loggerInit(null);
     defer logging.loggerDeinit();
 
     size = try getSize();
-
-    var gpa = std.heap.DebugAllocator(.{}){};
-    const alloc = gpa.allocator();
 
 
     const rope = try doc.openAsRope(alloc, "src/document.zig", init.io); // 6k
@@ -145,110 +112,160 @@ pub fn main(init: std.process.Init) !void {
 
     {
         const txt = try dc.getText();
-        try render(&.{}, dc.cursor, txt, dc.render_buffer.viewport);
+        try render(null, dc.cursor, txt, dc.render_buffer.viewport);
     }
 
-    var bci = parse_utils.BufferedCmdIterator{ .tty = term_utils.tty };
-    bci.tty_reader = std.Io.File.Reader.init(bci.tty, term_utils.app_io, &bci.reader_buf);
+    // CRITICAL: start the loop BEFORE queryTerminal — queryTerminal blocks on
+    // a futex that is only woken by the loop's reader thread processing the
+    // terminal's capability response.
+    var loop: vaxis.Loop(Event) = .init(init.io, &tty, &vx);
+    try loop.start();
+    defer loop.stop();
+
+    try vx.queryTerminal(tty.writer(), .fromSeconds(1));
 
     while (true) {
-        const cmd_full = try bci.next();
-        const cmd = cmd_full.raw_cmd;
-        const cmd2 = cmd_full.parsed_cmd;
+        const event = try loop.nextEvent();
+        var maybe_key: ?vaxis.Key = null;
+        switch (event) {
+            .key_press => |key| {
+                maybe_key = key;
+                const zone = tracy.initZone(@src(), .{ .name = "Handling command" });
+                defer zone.deinit();
 
-        {
-            const zone = tracy.initZone(@src(), .{ .name = "Handling command" });
-            defer zone.deinit();
-
-            //const txt_old = try dc.getText();
-            print("\n single cmd {any}\n", .{cmd});
-
-            if (genericMatch(cmd2, &q_eq)) {
-                return;
-            } else if (genericMatch(cmd2, &j_eq)) {
-                // next line
-                dc.moveView(1);
-            } else if (genericMatch(cmd2, &k_eq)) {
-                // previous line
-                dc.moveView(-1);
-            } else if (genericMatch(cmd2, &c_arrows)) {
-                // ctrl+arrow, move cursor
-                //  move cursor
-                dc.moveCursor(@enumFromInt(@intFromEnum(try selection_utils.matchDirSuffix(cmd2))));
-                // reset selection
-                dc.cursor.selection = Selection.emptySel(dc.cursor.pos);
-            } else if (genericMatch(cmd2, &sc_arrows)) {
-                // shift+ctrl+arrow, move cursor & selection
-                // move cursor
-                dc.moveCursor(@enumFromInt(@intFromEnum(try selection_utils.matchDirSuffix(cmd2))));
-                // update selection
-                dc.cursor.selection.head = dc.cursor.pos;
-            } else if (genericMatch(cmd2, &paste_sel)) {
-                try dc.pasteSelection();
-            } else if (genericMatch(cmd2, &undo)) {
-                dc.undo();
-            } else if (genericMatch(cmd2, &c_fn_arrows)) {
-                // ctrl+arrow, move cursor
-                // move cursor
-                const Case = enum { PGUP, PGDN, HOME, END };
-                const case = std.meta.stringToEnum(Case, cmd2[5..]);
-                if (case) |case_| {
-                    switch (case_) {
-                        .PGUP => dc.cursorPgUp(),
-                        .PGDN => dc.cursorPgDn(),
-                        .HOME => dc.cursorHome(),
-                        .END => dc.cursorEnd(),
-                    }
+                // ESC: exit insert mode; do nothing in normal mode
+                if (key.codepoint == vaxis.Key.escape) {
+                    if (mode == .insert) mode = .normal;
                 }
-            } else if (genericMatch(cmd2, &sc_fn_arrows)) {
-                // shift+ctrl+arrow, move cursor & selection
-                // move cursor
-                const Case = enum { PGUP, PGDN, HOME, END };
-                const case = std.meta.stringToEnum(Case, cmd2[11..]);
-                if (case) |case_| {
-                    switch (case_) {
-                        .PGUP => dc.cursorPgUp(),
-                        .PGDN => dc.cursorPgDn(),
-                        .HOME => dc.cursorHome(),
-                        .END => dc.cursorEnd(),
-                    }
-                    // update selection (TODO)!
+                // quit: q/Q in normal mode (no ctrl/alt)
+                else if (mode == .normal and
+                    (key.codepoint == 'q' or key.codepoint == 'Q') and
+                    !key.mods.ctrl and !key.mods.alt)
+                {
+                    return;
+                }
+                // enter insert mode: i (normal mode only)
+                else if (mode == .normal and key.codepoint == 'i' and
+                    !key.mods.ctrl and !key.mods.alt)
+                {
+                    mode = .insert;
+                }
+                // scroll down: j/J/down (no ctrl/alt)
+                else if ((key.codepoint == 'j' or key.codepoint == 'J' or
+                    key.codepoint == vaxis.Key.down) and !key.mods.ctrl and !key.mods.alt)
+                {
+                    dc.moveView(1);
+                }
+                // scroll up: k/K/up (no ctrl/alt)
+                else if ((key.codepoint == 'k' or key.codepoint == 'K' or
+                    key.codepoint == vaxis.Key.up) and !key.mods.ctrl and !key.mods.alt)
+                {
+                    dc.moveView(-1);
+                }
+                // ctrl+arrows (no shift): move cursor + reset selection
+                else if (key.mods.ctrl and !key.mods.shift and isArrow(key.codepoint)) {
+                    dc.moveCursor(dirFromKey(key.codepoint));
+                    dc.cursor.selection = Selection.emptySel(dc.cursor.pos);
+                }
+                // shift+ctrl+arrows: move cursor + update selection
+                else if (key.mods.ctrl and key.mods.shift and isArrow(key.codepoint)) {
+                    dc.moveCursor(dirFromKey(key.codepoint));
                     dc.cursor.selection.head = dc.cursor.pos;
                 }
-            }
-            else if (mode == .normal and genericMatch(cmd2, &insert_mode)) {
-                mode = .insert;
-            } else if (mode == .insert and genericMatch(cmd2, &normal_mode)) {
-                mode = .normal;
-            } else if (mode == .insert) {
-                try dc.insertAtCursor(cmd2);
-            }
+                // paste: ctrl+y
+                else if (key.matches('y', .{ .ctrl = true })) {
+                    try dc.pasteSelection();
+                }
+                // undo: ctrl+u
+                else if (key.matches('u', .{ .ctrl = true })) {
+                    dc.undo();
+                }
+                // page up (plain or ctrl, no shift)
+                else if (key.codepoint == vaxis.Key.page_up and !key.mods.shift) {
+                    dc.cursorPgUp();
+                }
+                // shift+ctrl+page_up
+                else if (key.codepoint == vaxis.Key.page_up and key.mods.ctrl and key.mods.shift) {
+                    dc.cursorPgUp();
+                    dc.cursor.selection.head = dc.cursor.pos;
+                }
+                // page down (plain or ctrl, no shift)
+                else if (key.codepoint == vaxis.Key.page_down and !key.mods.shift) {
+                    dc.cursorPgDn();
+                }
+                // shift+ctrl+page_down
+                else if (key.codepoint == vaxis.Key.page_down and key.mods.ctrl and key.mods.shift) {
+                    dc.cursorPgDn();
+                    dc.cursor.selection.head = dc.cursor.pos;
+                }
+                // ctrl+home (no shift)
+                else if (key.codepoint == vaxis.Key.home and key.mods.ctrl and !key.mods.shift) {
+                    dc.cursorHome();
+                }
+                // shift+ctrl+home
+                else if (key.codepoint == vaxis.Key.home and key.mods.ctrl and key.mods.shift) {
+                    dc.cursorHome();
+                    dc.cursor.selection.head = dc.cursor.pos;
+                }
+                // ctrl+end (no shift)
+                else if (key.codepoint == vaxis.Key.end and key.mods.ctrl and !key.mods.shift) {
+                    dc.cursorEnd();
+                }
+                // shift+ctrl+end
+                else if (key.codepoint == vaxis.Key.end and key.mods.ctrl and key.mods.shift) {
+                    dc.cursorEnd();
+                    dc.cursor.selection.head = dc.cursor.pos;
+                }
+                // insert text (insert mode)
+                else if (mode == .insert and key.text != null) {
+                    try dc.insertAtCursor(key.text.?);
+                }
+            },
+            .winsize => |ws| {
+                size = .{ .width = ws.cols, .height = ws.rows };
+            },
+            .paste => |text| {
+                defer alloc.free(text);
+                if (mode == .insert) {
+                    try dc.insertAtCursor(text);
+                }
+            },
+            else => {},
         }
 
-        {
-            const zone_print = tracy.initZone(@src(), .{ .name = "print" });
-            defer zone_print.deinit();
-            print("\nAfter handling commands: dc.vp: {}\n", .{ dc.render_buffer.viewport});
-            print("Cursor: {any}\n\n", .{dc.cursor});
-        }
-        //try dc.render_buffer.resize(vp);
         const txt = b: {
             const zone_txt = tracy.initZone(@src(), .{ .name = "Getting text" });
             defer zone_txt.deinit();
             break :b try dc.getText();
         };
-        //try render(&.{}, dc.cursor, txt, vp);
         {
             const zone_rndr = tracy.initZone(@src(), .{ .name = "Rendering" });
             defer zone_rndr.deinit();
-            try render(cmd, dc.cursor, txt, dc.render_buffer.viewport);
+            try render(maybe_key, dc.cursor, txt, dc.render_buffer.viewport);
         }
     }
 }
 
+/// true if codepoint is one of the four arrow keys
+fn isArrow(cp: u21) bool {
+    return cp == vaxis.Key.up or cp == vaxis.Key.down or
+        cp == vaxis.Key.left or cp == vaxis.Key.right;
+}
+
+/// map an arrow key codepoint to a Direction
+fn dirFromKey(cp: u21) Direction {
+    return switch (cp) {
+        vaxis.Key.up => .up,
+        vaxis.Key.down => .down,
+        vaxis.Key.left => .left,
+        vaxis.Key.right => .right,
+        else => unreachable,
+    };
+}
+
 /// render the current view
-fn render(maybe_bytes: ?[]const u8, cursor: Cursor, lns: [] const doc.LineSlice, view: doc.ViewPort) !void {
-    const writer = &term_utils.tty_writer.interface;
+fn render(maybe_key: ?vaxis.Key, cursor: Cursor, lns: [] const doc.LineSlice, view: doc.ViewPort) !void {
+    const writer = tty.writer();
 
     try clear(writer);
 
@@ -260,8 +277,7 @@ fn render(maybe_bytes: ?[]const u8, cursor: Cursor, lns: [] const doc.LineSlice,
     //try renderLines(writer);
     try render_sel(writer, cursor, view, lns);
     try render_cursor(writer, cursor, view, lns);
-    try render_bottom_ui(maybe_bytes, writer, cursor, view);
-    _ = &maybe_bytes;
+    try render_bottom_ui(maybe_key, writer, cursor, view);
 
     try writer.flush();
 }
@@ -294,25 +310,24 @@ fn render_line_numbers(writer: anytype, view: doc.ViewPort) !void {
 // }
 
 /// render bottom ui
-fn render_bottom_ui(maybe_bytes: ?[]const u8, writer: anytype, cursor: Cursor, view: doc.ViewPort) !void {
-    // input?
-    if (maybe_bytes) |bytes| {
-        // input given
-        // raw input row
-        try moveCursor(writer, size.height - 2, 0);
-        try writer.print("\x1B[46m", .{});
-        try writer.writeAll("Raw input:       ");
-        try parse_utils.rawWrite(bytes, writer);
-        // parsed input row
-        try moveCursor(writer, size.height - 1, 0);
-        try writer.writeAll("Parsed input:    ");
-        try parse_utils.parseWrite(bytes, writer);
-        try writer.print("\x1B[49m", .{});
+fn render_bottom_ui(maybe_key: ?vaxis.Key, writer: anytype, cursor: Cursor, view: doc.ViewPort) !void {
+    // caps indicator line
+    try moveCursor(writer, size.height - 2, 0);
+    try writer.print("\x1B[46m", .{});
+    try writer.print("Protocol: kitty: {s} | rgb: {s} | unicode: {s} | sgr_px: {s}", .{
+        if (vx.caps.kitty_keyboard) "yes" else "no",
+        if (vx.caps.rgb) "yes" else "no",
+        @tagName(vx.caps.unicode),
+        if (vx.caps.sgr_pixels) "yes" else "no",
+    });
+    // key event line
+    try moveCursor(writer, size.height - 1, 0);
+    if (maybe_key) |key| {
+        try writer.print("Key: codepoint={d} mods={any} text={?s}", .{ key.codepoint, key.mods, key.text });
     } else {
-        // no input
-        try moveCursor(writer, size.height - 2, 0);
-        try writer.writeAll("No input recieved!");
+        try writer.writeAll("Key: (none)");
     }
+    try writer.print("\x1B[49m", .{});
     // status row
     try moveCursor(writer, size.height - 3, 0);
     try writer.print("\x1B[45m", .{});
@@ -401,17 +416,13 @@ fn clear(writer: anytype) !void {
 const Size = struct { width: usize, height: usize };
 /// get the window size
 fn getSize() !Size {
-    var win_size = mem.zeroes(std.posix.winsize);
-    if (linux.ioctl(tty.handle, linux.T.IOCGWINSZ, @intFromPtr(&win_size)) != 0) {
-        @panic("getsize failed ioctl()");
-    }
-    const height: usize = win_size.row;
+    const ws = try tty.getWinsize();
+    const height: usize = ws.rows;
     // update number of rows available for content
     if (height < non_content_rows) unreachable;
-    //const content_rows = win_size.ws_row - non_content_rows;
     return Size{
-        .height = win_size.row,
-        .width = win_size.col,
+        .height = ws.rows,
+        .width = ws.cols,
     };
 }
 
@@ -420,4 +431,90 @@ fn getSize() !Size {
 test {
     std.testing.refAllDecls(@This());
     // or refAllDeclsRecursive
+}
+
+// --- vaxis.Parser.parse() unit tests (kitty + legacy encodings) ---
+
+test "vaxis parser: legacy up arrow" {
+    var parser: vaxis.Parser = .{};
+    const result = try parser.parse("\x1b[A", std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 3), result.n);
+    const key = result.event.?.key_press;
+    try std.testing.expectEqual(vaxis.Key.up, key.codepoint);
+    try std.testing.expect(key.mods.eql(.{}));
+}
+
+test "vaxis parser: legacy ctrl+up arrow" {
+    var parser: vaxis.Parser = .{};
+    const result = try parser.parse("\x1b[1;5A", std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 6), result.n);
+    const key = result.event.?.key_press;
+    try std.testing.expectEqual(vaxis.Key.up, key.codepoint);
+    try std.testing.expect(key.mods.ctrl);
+    try std.testing.expect(!key.mods.shift);
+}
+
+test "vaxis parser: legacy shift+ctrl+up arrow" {
+    var parser: vaxis.Parser = .{};
+    const result = try parser.parse("\x1b[1;6A", std.testing.allocator);
+    const key = result.event.?.key_press;
+    try std.testing.expectEqual(vaxis.Key.up, key.codepoint);
+    try std.testing.expect(key.mods.ctrl);
+    try std.testing.expect(key.mods.shift);
+}
+
+test "vaxis parser: legacy plain key 'q'" {
+    var parser: vaxis.Parser = .{};
+    const result = try parser.parse("q", std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), result.n);
+    const key = result.event.?.key_press;
+    try std.testing.expectEqual(@as(u21, 'q'), key.codepoint);
+    try std.testing.expect(key.mods.eql(.{}));
+}
+
+test "vaxis parser: legacy ctrl+a (0x01)" {
+    var parser: vaxis.Parser = .{};
+    const result = try parser.parse("\x01", std.testing.allocator);
+    const key = result.event.?.key_press;
+    try std.testing.expectEqual(@as(u21, 'a'), key.codepoint);
+    try std.testing.expect(key.mods.ctrl);
+}
+
+test "vaxis parser: legacy escape" {
+    var parser: vaxis.Parser = .{};
+    const result = try parser.parse("\x1b", std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), result.n);
+    const key = result.event.?.key_press;
+    try std.testing.expectEqual(vaxis.Key.escape, key.codepoint);
+}
+
+test "vaxis parser: kitty CSI u plain 'q'" {
+    var parser: vaxis.Parser = .{};
+    const result = try parser.parse("\x1b[113u", std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 6), result.n);
+    const key = result.event.?.key_press;
+    try std.testing.expectEqual(@as(u21, 'q'), key.codepoint);
+    try std.testing.expect(key.mods.eql(.{}));
+}
+
+test "vaxis parser: kitty CSI u ctrl+a" {
+    var parser: vaxis.Parser = .{};
+    const result = try parser.parse("\x1b[97;5u", std.testing.allocator);
+    const key = result.event.?.key_press;
+    try std.testing.expectEqual(@as(u21, 'a'), key.codepoint);
+    try std.testing.expect(key.mods.ctrl);
+}
+
+test "vaxis parser: kitty CSI u special key (down)" {
+    var parser: vaxis.Parser = .{};
+    const result = try parser.parse("\x1b[57353u", std.testing.allocator);
+    const key = result.event.?.key_press;
+    try std.testing.expectEqual(vaxis.Key.down, key.codepoint);
+}
+
+test "vaxis parser: partial CSI sequence needs more bytes" {
+    var parser: vaxis.Parser = .{};
+    const result = try parser.parse("\x1b[", std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), result.n);
+    try std.testing.expect(result.event == null);
 }
