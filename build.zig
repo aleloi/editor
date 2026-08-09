@@ -161,6 +161,22 @@ pub fn build(b: *std.Build) !void {
         test_step.dependOn(&run_rope_test.step);
     }
 
+    // Fuzz test target — needs the same deps as mini.zig tests because
+    // action.zig transitively imports vaxis, plus rope + tracy.
+    const fuzz_test = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/fuzz_test.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    addDeps(fuzz_test, b);
+    addTracy(fuzz_test, tracy);
+    fuzz_test.root_module.addImport("rope", rope_mod);
+    const run_fuzz_test = b.addRunArtifact(fuzz_test);
+    run_fuzz_test.has_side_effects = true;
+    test_step.dependOn(&run_fuzz_test.step);
+
     // zig build test --summary all
 
     const exe_check = b.addExecutable(.{
