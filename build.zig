@@ -11,6 +11,13 @@ fn addDeps(exe: *std.Build.Step.Compile, b: *std.Build) void {
 
     exe.root_module.addImport("treez", tree_sitter_dep.module("treez"));
 
+    const vaxis_dep = b.dependency("vaxis", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    exe.root_module.addImport("vaxis", vaxis_dep.module("vaxis"));
+
     exe.root_module.link_libc = true;
 }
 
