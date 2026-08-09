@@ -2,9 +2,7 @@ const std = @import("std");
 
 const doc = @import("document.zig");
 const Cursor = doc.Cursor;
-const Selection = doc.Selection;
 const Point = doc.Pos;
-const Direction = doc.Direction;
 
 const tracy = @import("tracy");
 const treez = @import("treez");
@@ -15,6 +13,7 @@ const write_utils = @import("write_utils.zig");
 const misc_utils = @import("misc_utils.zig");
 const selection_utils = @import("selection_utils.zig");
 const logging = @import("logging.zig");
+const action = @import("action.zig");
 
 pub const std_options = logging.std_options;
 pub const logger = logging.default_logger;
@@ -64,10 +63,7 @@ fn isBetween(A: Point, B: Point, C: Point) bool {
     return ((!cmpPoints(B, A)) and cmpPoints(B, C));
 }
 
-const Mode = enum {
-    insert,
-    normal
-};
+const Mode = action.Mode;
 
 var mode: Mode = .normal;
 
@@ -133,93 +129,8 @@ pub fn main(init: std.process.Init) !void {
                 const zone = tracy.initZone(@src(), .{ .name = "Handling command" });
                 defer zone.deinit();
 
-                // ESC: exit insert mode; do nothing in normal mode
-                if (key.codepoint == vaxis.Key.escape) {
-                    if (mode == .insert) mode = .normal;
-                }
-                // quit: q/Q in normal mode (no ctrl/alt)
-                else if (mode == .normal and
-                    (key.codepoint == 'q' or key.codepoint == 'Q') and
-                    !key.mods.ctrl and !key.mods.alt)
-                {
-                    return;
-                }
-                // enter insert mode: i (normal mode only)
-                else if (mode == .normal and key.codepoint == 'i' and
-                    !key.mods.ctrl and !key.mods.alt)
-                {
-                    mode = .insert;
-                }
-                // scroll down: j/J/down (no ctrl/alt)
-                else if ((key.codepoint == 'j' or key.codepoint == 'J' or
-                    key.codepoint == vaxis.Key.down) and !key.mods.ctrl and !key.mods.alt)
-                {
-                    dc.moveView(1);
-                }
-                // scroll up: k/K/up (no ctrl/alt)
-                else if ((key.codepoint == 'k' or key.codepoint == 'K' or
-                    key.codepoint == vaxis.Key.up) and !key.mods.ctrl and !key.mods.alt)
-                {
-                    dc.moveView(-1);
-                }
-                // ctrl+arrows (no shift): move cursor + reset selection
-                else if (key.mods.ctrl and !key.mods.shift and isArrow(key.codepoint)) {
-                    dc.moveCursor(dirFromKey(key.codepoint));
-                    dc.cursor.selection = Selection.emptySel(dc.cursor.pos);
-                }
-                // shift+ctrl+arrows: move cursor + update selection
-                else if (key.mods.ctrl and key.mods.shift and isArrow(key.codepoint)) {
-                    dc.moveCursor(dirFromKey(key.codepoint));
-                    dc.cursor.selection.head = dc.cursor.pos;
-                }
-                // paste: ctrl+y
-                else if (key.matches('y', .{ .ctrl = true })) {
-                    try dc.pasteSelection();
-                }
-                // undo: ctrl+u
-                else if (key.matches('u', .{ .ctrl = true })) {
-                    dc.undo();
-                }
-                // page up (plain or ctrl, no shift)
-                else if (key.codepoint == vaxis.Key.page_up and !key.mods.shift) {
-                    dc.cursorPgUp();
-                }
-                // shift+ctrl+page_up
-                else if (key.codepoint == vaxis.Key.page_up and key.mods.ctrl and key.mods.shift) {
-                    dc.cursorPgUp();
-                    dc.cursor.selection.head = dc.cursor.pos;
-                }
-                // page down (plain or ctrl, no shift)
-                else if (key.codepoint == vaxis.Key.page_down and !key.mods.shift) {
-                    dc.cursorPgDn();
-                }
-                // shift+ctrl+page_down
-                else if (key.codepoint == vaxis.Key.page_down and key.mods.ctrl and key.mods.shift) {
-                    dc.cursorPgDn();
-                    dc.cursor.selection.head = dc.cursor.pos;
-                }
-                // ctrl+home (no shift)
-                else if (key.codepoint == vaxis.Key.home and key.mods.ctrl and !key.mods.shift) {
-                    dc.cursorHome();
-                }
-                // shift+ctrl+home
-                else if (key.codepoint == vaxis.Key.home and key.mods.ctrl and key.mods.shift) {
-                    dc.cursorHome();
-                    dc.cursor.selection.head = dc.cursor.pos;
-                }
-                // ctrl+end (no shift)
-                else if (key.codepoint == vaxis.Key.end and key.mods.ctrl and !key.mods.shift) {
-                    dc.cursorEnd();
-                }
-                // shift+ctrl+end
-                else if (key.codepoint == vaxis.Key.end and key.mods.ctrl and key.mods.shift) {
-                    dc.cursorEnd();
-                    dc.cursor.selection.head = dc.cursor.pos;
-                }
-                // insert text (insert mode)
-                else if (mode == .insert and key.text != null) {
-                    try dc.insertAtCursor(key.text.?);
-                }
+                const act = action.interpretKeypress(key, mode);
+                if (try action.applyAction(&dc, act, &mode)) break;
             },
             .winsize => |ws| {
                 size = .{ .width = ws.cols, .height = ws.rows };
@@ -244,23 +155,6 @@ pub fn main(init: std.process.Init) !void {
             try render(maybe_key, dc.cursor, txt, dc.render_buffer.viewport);
         }
     }
-}
-
-/// true if codepoint is one of the four arrow keys
-fn isArrow(cp: u21) bool {
-    return cp == vaxis.Key.up or cp == vaxis.Key.down or
-        cp == vaxis.Key.left or cp == vaxis.Key.right;
-}
-
-/// map an arrow key codepoint to a Direction
-fn dirFromKey(cp: u21) Direction {
-    return switch (cp) {
-        vaxis.Key.up => .up,
-        vaxis.Key.down => .down,
-        vaxis.Key.left => .left,
-        vaxis.Key.right => .right,
-        else => unreachable,
-    };
 }
 
 /// render the current view
@@ -431,6 +325,7 @@ fn getSize() !Size {
 test {
     std.testing.refAllDecls(@This());
     // or refAllDeclsRecursive
+    std.testing.refAllDecls(@import("action.zig"));
 }
 
 // --- vaxis.Parser.parse() unit tests (kitty + legacy encodings) ---
